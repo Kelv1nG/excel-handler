@@ -245,6 +245,72 @@ class ExcelTableReader:
 
         return df
 
+    def extract_table_near_cell(
+        self,
+        ref_cell: str,
+        sheet: str,
+        has_headers: bool = True,
+        column_names: list[str] | None = None,
+        unmerge_cells: bool = True,
+        fill_forward: bool = True,
+        max_empty_rows: int = 2,
+    ) -> pl.DataFrame:
+        """
+        Find and extract a table by scanning right and downward from a reference cell.
+
+        Useful when the exact table start is unknown but a nearby anchor cell is known.
+        The first non-empty cell found scanning row-by-row left-to-right is treated
+        as the top-left corner of the table.
+
+        Note: If ref_cell itself is non-empty, it is treated as the table start.
+        Point ref_cell below or to the right of any title content to skip it.
+
+        Args:
+            ref_cell: Anchor cell to start searching from (e.g., "B2")
+            sheet: Sheet name (REQUIRED)
+            has_headers: First row of found table contains headers
+            column_names: Manual column names if has_headers=False
+            unmerge_cells: Unmerge cells before extraction
+            fill_forward: Forward-fill null values after extraction
+            max_empty_rows: Stop after this many consecutive empty rows
+
+        Returns:
+            Polars DataFrame
+
+        Raises:
+            TableNotFoundError: If no non-empty cell is found from ref_cell onward
+        """
+        sheet_obj = self._get_sheet(sheet)
+
+        if unmerge_cells:
+            self._unmerge_and_fill_sheet(sheet_obj)
+
+        ref_row, ref_col = coordinate_to_tuple(ref_cell)
+        table_start = self._find_table_start(sheet_obj, ref_row, ref_col)
+
+        if table_start is None:
+            raise TableNotFoundError(
+                f"No table found searching right and down from {ref_cell} "
+                f"in sheet '{sheet}' of {self.filepath}"
+            )
+
+        start_row, start_col = table_start
+        boundaries = self._detect_boundaries_in_sheet(
+            sheet_obj, start_row, start_col, has_headers, max_empty_rows
+        )
+
+        df = self._extract_range_from_sheet(
+            sheet_obj,
+            *boundaries,
+            has_headers=has_headers,
+            column_names=column_names,
+        )
+
+        if fill_forward and len(df) > 0:
+            df = df.with_columns([pl.col(col).forward_fill() for col in df.columns])
+
+        return df
+
     # ==================== Utility Methods (INTERNAL) ====================
 
     def _get_sheet(self, sheet_name: str) -> Worksheet:
@@ -292,6 +358,30 @@ class ExcelTableReader:
             for row in range(min_row, max_row + 1):
                 for col in range(min_col, max_col + 1):
                     cast(Cell, sheet.cell(row, col)).value = value
+
+    def _find_table_start(
+        self,
+        sheet: Worksheet,
+        ref_row: int,
+        ref_col: int,
+    ) -> tuple[int, int] | None:
+        """
+        Scan right and downward from (ref_row, ref_col) to find the first non-empty cell.
+
+        Args:
+            sheet: Worksheet object
+            ref_row: Starting row (1-indexed)
+            ref_col: Starting column (1-indexed)
+
+        Returns:
+            (row, col) of first non-empty cell, or None if not found
+        """
+        for row in range(ref_row, sheet.max_row + 1):
+            for col in range(ref_col, sheet.max_column + 1):
+                value = sheet.cell(row, col).value
+                if value is not None and value != "":
+                    return (row, col)
+        return None
 
     def _detect_boundaries_in_sheet(
         self,
