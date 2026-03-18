@@ -25,6 +25,7 @@ class TestExtractByColumnNames:
             df = reader.extract_table_by_column_names(["Name"])
         assert "Amount" in df.columns
         assert "Category" in df.columns
+        assert "Name" in df.columns
         assert len(df) == 3
 
     def test_unordered_columns_finds_table(self, simple_table_path):
