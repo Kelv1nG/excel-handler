@@ -1,3 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [project]
 name = "template-writer"
 version = "0.1.0"
@@ -8,4 +11,9 @@ dependencies = [
     "openpyxl>=3.1.5",
     "polars>=1.39.0",
     "pydantic>=2.12.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
 ]
