@@ -46,4 +46,6 @@ class TableNotFoundError(ExcelTableReaderError):
 class MultipleTablesFoundError(ExcelTableReaderError):
     """Multiple table match found"""
 
-    def __init__(self, message: str, found_in: list[str]): ...
+    def __init__(self, message: str, found_in: list[str]):
+        super().__init__(message)
+        self.found_in = found_in
