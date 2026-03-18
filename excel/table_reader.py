@@ -1,18 +1,22 @@
 from openpyxl.utils import coordinate_to_tuple, range_boundaries
 import polars as pl
-from typing import Optional, Tuple, List, Any
-from excel.exceptions import ExcelDataExtractorError, TableNotFoundError
+from typing import cast
+from types import TracebackType
+from excel.exceptions import (
+    ExcelTableReaderError,
+    TableNotFoundError,
+    MultipleTablesFoundError,
+)
 from excel.utils import load_excel_workbook
 from openpyxl.workbook.workbook import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.cell.cell import Cell
 
 
-class ExcelDataExtractor:
-    """Universal Excel data extraction utility."""
-
+class ExcelTableReader:
     def __init__(self, filepath: str):
-        """Initialize extractor for an Excel file."""
         self.filepath = filepath
-        self._wb: Optional[Workbook] = None
+        self._wb: Workbook | None = None
 
     @property
     def wb(self) -> Workbook:
@@ -23,135 +27,60 @@ class ExcelDataExtractor:
             Workbook object
 
         Raises:
-            ExcelDataExtractorError: If workbook not loaded
+            ExcelTableReaderError: If workbook not loaded
         """
         if self._wb is None:
-            raise ExcelDataExtractorError(
-                "Workbook not loaded. Use ExcelDataExtractor as context manager:\n"
-                "    with ExcelDataExtractor('file.xlsx') as extractor:\n"
-                "        df = extractor.extract_by_columns([...])"
+            raise ExcelTableReaderError(
+                "Workbook not loaded. Use ExcelTableReader as context manager:\n"
+                "    with ExcelTableReader('file.xlsx') as reader:\n"
+                "        df = reader.extract_table_by_column_names([...])"
             )
         return self._wb
 
-    def __enter__(self):
-        """Context manager entry - opens workbook."""
+    def __enter__(self) -> "ExcelTableReader":
         self._wb = load_excel_workbook(self.filepath, data_only=True)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - closes workbook."""
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         if self._wb:
             self._wb.close()
 
-    def _get_sheet(self, sheet_name: Optional[str] = None):
-        """
-        Get sheet, with validation.
-
-        Args:
-            sheet_name: Sheet name (if None, uses active sheet)
-
-        Returns:
-            Worksheet object
-
-        Raises:
-            ExcelDataExtractorError: If sheet not found
-        """
-        # self.wb property ensures non-None
-        if sheet_name is None:
-            return self.wb.active  # ✅ Type checker happy
-
-        if sheet_name not in self.wb.sheetnames:  # ✅ Type checker happy
-            raise ExcelDataExtractorError(
-                f"Sheet '{sheet_name}' not found in {self.filepath}. "
-                f"Available sheets: {self.wb.sheetnames}"
-            )
-
-        return self.wb[
-            sheet_name
-        ]  # ==================== Table Extraction (PUBLIC API) ====================
-
-    def extract_table_by_columns(
+    def extract_table_by_column_names(
         self,
-        required_columns: List[str],
-        sheet: Optional[str] = None,
-        search_all_sheets: bool = False,
+        required_columns: list[str],
         unmerge_cells: bool = True,
-        exclude_summary: bool = True,
         fill_forward: bool = True,
-        max_header_search_rows: int = 100,
     ) -> pl.DataFrame:
-        """
-        Find and extract table by searching for column headers.
 
-        Args:
-            required_columns: Column names that must be present
-            sheet: Sheet name to search (if None, searches active sheet or all sheets)
-            search_all_sheets: If True, searches all sheets for the table
-            unmerge_cells: Unmerge and fill merged cells
-            exclude_summary: Exclude summary rows
-            fill_forward: Fill forward for hierarchical data
-            max_header_search_rows: Max rows to search for headers
+        for sheet_name in self.wb.sheetnames:
+            try:
+                df = self.extract_table_by_column_names_from_sheet(
+                    required_columns,
+                    sheet_name,
+                    unmerge_cells,
+                    fill_forward,
+                )
+            except TableNotFoundError:
+                continue
+            else:
+                return df
 
-        Returns:
-            Polars DataFrame
+        raise TableNotFoundError(
+            f"Could not find table with columns {required_columns} "
+            f"in any sheet of {self.filepath}"
+        )
 
-        Raises:
-            TableNotFoundError: If table not found
-
-        Examples:
-            >>> # Search in active sheet
-            >>> df = extractor.extract_by_columns(['Company', 'Amount'])
-
-            >>> # Search in specific sheet
-            >>> df = extractor.extract_by_columns(['Company', 'Amount'], sheet='Data')
-
-            >>> # Search all sheets
-            >>> df = extractor.extract_by_columns(
-            ...     ['Company', 'Amount'],
-            ...     search_all_sheets=True
-            ... )
-        """
-        if search_all_sheets:
-            # Search all sheets until found
-            for sheet_name in self.wb.sheetnames:
-                try:
-                    return self._extract_by_columns_from_sheet(
-                        sheet_name,
-                        required_columns,
-                        unmerge_cells,
-                        exclude_summary,
-                        fill_forward,
-                        max_header_search_rows,
-                    )
-                except TableNotFoundError:
-                    # Not in this sheet, continue to next
-                    continue
-
-            # Not found in any sheet
-            raise TableNotFoundError(
-                f"Could not find table with columns {required_columns} "
-                f"in any sheet of {self.filepath}"
-            )
-        else:
-            # Search specific sheet (or active)
-            sheet_obj = self._get_sheet(sheet)
-            return self._extract_by_columns_from_sheet(
-                sheet_obj.title,
-                required_columns,
-                unmerge_cells,
-                exclude_summary,
-                fill_forward,
-                max_header_search_rows,
-            )
-
-    def _extract_table_by_columns_from_sheet(
+    def extract_table_by_column_names_from_sheet(
         self,
+        required_columns: list[str],
         sheet_name: str,
-        required_columns: List[str],
-        unmerge_cells: bool,
-        exclude_summary: bool,
-        fill_forward: bool,
-        max_header_search_rows: int,
+        unmerge_cells: bool = True,
+        fill_forward: bool = True,
     ) -> pl.DataFrame:
         """
         Internal method to extract from a specific sheet.
@@ -160,9 +89,7 @@ class ExcelDataExtractor:
             sheet_name: Name of sheet to extract from
             required_columns: Columns to find
             unmerge_cells: Unmerge cells
-            exclude_summary: Exclude summary
             fill_forward: Fill forward
-            max_header_search_rows: Max rows to search
 
         Returns:
             Polars DataFrame
@@ -172,38 +99,31 @@ class ExcelDataExtractor:
         """
         sheet = self._get_sheet(sheet_name)
 
-        # Step 1: Unmerge cells if requested
         if unmerge_cells:
             self._unmerge_and_fill_sheet(sheet)
 
-        # Step 2: Find header row
         header_row = self._find_header_row_in_sheet(
-            sheet, required_columns, max_header_search_rows
+            sheet,
+            required_columns,
         )
 
-        if header_row is None:
-            raise TableNotFoundError(
-                f"Could not find table with columns: {required_columns} "
-                f"in sheet '{sheet_name}' (searched first {max_header_search_rows} rows)"
-            )
-
-        # Step 3: Detect table boundaries from header row
-        # Start from column 1 (A) by default
-        start_col = 1
+        # Find the leftmost column that contains any cell value in the header row
+        start_col = next(
+            cell.column
+            for cell in sheet[header_row]
+            if cell.value is not None and cell.value != ""
+        )
         boundaries = self._detect_boundaries_in_sheet(
             sheet, header_row, start_col, has_headers=True
         )
 
-        # Step 4: Extract the range
         df = self._extract_range_from_sheet(
             sheet,
             *boundaries,
             has_headers=True,
             column_names=None,
-            exclude_summary=exclude_summary,
         )
 
-        # Step 5: Fill forward if requested
         if fill_forward and len(df) > 0:
             df = df.with_columns([pl.col(col).forward_fill() for col in df.columns])
 
@@ -214,9 +134,8 @@ class ExcelDataExtractor:
         range_str: str,
         sheet: str,
         has_headers: bool = True,
-        column_names: Optional[List[str]] = None,
+        column_names: list[str] | None = None,
         unmerge_cells: bool = True,
-        exclude_summary: bool = True,
         fill_forward: bool = True,
     ) -> pl.DataFrame:
         """
@@ -228,7 +147,6 @@ class ExcelDataExtractor:
             has_headers: First row contains headers
             column_names: Manual column names if has_headers=False
             unmerge_cells: Unmerge cells
-            exclude_summary: Exclude summary rows
             fill_forward: Fill forward
 
         Returns:
@@ -243,23 +161,18 @@ class ExcelDataExtractor:
             ...     column_names=['ID', 'Name', 'Value']
             ... )
         """
-        # Get sheet
         sheet_obj = self._get_sheet(sheet)
 
-        # Step 1: Unmerge cells if requested
         if unmerge_cells:
             self._unmerge_and_fill_sheet(sheet_obj)
 
-        # Step 2: Parse range
         min_col, min_row, max_col, max_row = range_boundaries(range_str)
 
-        # assert values are not None
         assert min_row is not None
         assert min_col is not None
         assert max_row is not None
         assert max_col is not None
 
-        # Step 3: Extract
         df = self._extract_range_from_sheet(
             sheet_obj,
             min_row,
@@ -268,23 +181,20 @@ class ExcelDataExtractor:
             max_col,
             has_headers=has_headers,
             column_names=column_names,
-            exclude_summary=exclude_summary,
         )
 
-        # Step 4: Fill forward
         if fill_forward and len(df) > 0:
             df = df.with_columns([pl.col(col).forward_fill() for col in df.columns])
 
         return df
 
-    def extract_from_cell(
+    def extract_table_from_cell(
         self,
         start_cell: str,
         sheet: str,
         has_headers: bool = True,
-        column_names: Optional[List[str]] = None,
+        column_names: list[str] | None = None,
         unmerge_cells: bool = True,
-        exclude_summary: bool = True,
         fill_forward: bool = True,
         max_empty_rows: int = 2,
     ) -> pl.DataFrame:
@@ -297,7 +207,6 @@ class ExcelDataExtractor:
             has_headers: First row is headers
             column_names: Manual column names
             unmerge_cells: Unmerge cells
-            exclude_summary: Exclude summary
             fill_forward: Fill forward
             max_empty_rows: Stop threshold
 
@@ -328,7 +237,6 @@ class ExcelDataExtractor:
             *boundaries,
             has_headers=has_headers,
             column_names=column_names,
-            exclude_summary=exclude_summary,
         )
 
         # Step 5: Fill forward
@@ -339,7 +247,29 @@ class ExcelDataExtractor:
 
     # ==================== Utility Methods (INTERNAL) ====================
 
-    def _unmerge_and_fill_sheet(self, sheet):
+    def _get_sheet(self, sheet_name: str) -> Worksheet:
+        """
+        Get sheet, with validation.
+
+        Args:
+            sheet_name: Sheet name (if None, uses active sheet)
+
+        Returns:
+            Worksheet object
+
+        Raises:
+            ExcelDataExtractorError: If sheet not found
+        """
+
+        if sheet_name not in self.wb.sheetnames:
+            raise ExcelTableReaderError(
+                f"Sheet '{sheet_name}' not found in {self.filepath}. "
+                f"Available sheets: {self.wb.sheetnames}"
+            )
+
+        return self.wb[sheet_name]
+
+    def _unmerge_and_fill_sheet(self, sheet: Worksheet) -> None:
         """
         Unmerge all merged cells in the sheet and fill values forward.
 
@@ -361,16 +291,16 @@ class ExcelDataExtractor:
             # Fill value to all cells in the range
             for row in range(min_row, max_row + 1):
                 for col in range(min_col, max_col + 1):
-                    sheet.cell(row, col).value = value
+                    cast(Cell, sheet.cell(row, col)).value = value
 
     def _detect_boundaries_in_sheet(
         self,
-        sheet,
+        sheet: Worksheet,
         start_row: int,
         start_col: int,
         has_headers: bool = True,
         max_empty_rows: int = 2,
-    ) -> Tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int]:
         """
         Auto-detect table boundaries from a starting point.
 
@@ -420,35 +350,15 @@ class ExcelDataExtractor:
 
         return (start_row, start_col, max_row, max_col)
 
-    @staticmethod
-    def _is_summary_row(row_values: List[Any]) -> bool:
-        """
-        Check if row contains summary keywords.
-
-        Args:
-            row_values: List of cell values in the row
-
-        Returns:
-            True if row appears to be a summary/total row
-        """
-        # Convert all values to lowercase string
-        text = " ".join(str(v).lower() for v in row_values if v is not None)
-
-        # Check for summary keywords
-        keywords = ["total", "sum", "subtotal", "grand total", "summary"]
-
-        return any(keyword in text for keyword in keywords)
-
     def _extract_range_from_sheet(
         self,
-        sheet,
+        sheet: Worksheet,
         min_row: int,
         min_col: int,
         max_row: int,
         max_col: int,
         has_headers: bool = True,
-        column_names: Optional[List[str]] = None,
-        exclude_summary: bool = False,
+        column_names: list[str] | None = None,
     ) -> pl.DataFrame:
         """
         Extract data from specific cell range.
@@ -459,15 +369,16 @@ class ExcelDataExtractor:
             max_row, max_col: Bottom-right corner (1-indexed)
             has_headers: Whether first row contains headers
             column_names: Manual column names if has_headers=False
-            exclude_summary: Skip summary rows
 
         Returns:
             Polars DataFrame
         """
         # Step 1: Get headers
+        headers: list[str]
         if has_headers:
             headers = [
-                sheet.cell(min_row, col).value for col in range(min_col, max_col + 1)
+                str(sheet.cell(min_row, col).value)
+                for col in range(min_col, max_col + 1)
             ]
             data_start = min_row + 1
         else:
@@ -484,11 +395,6 @@ class ExcelDataExtractor:
             row_data = [
                 sheet.cell(row, col).value for col in range(min_col, max_col + 1)
             ]
-
-            # Skip summary rows if requested
-            if exclude_summary and self._is_summary_row(row_data):
-                continue
-
             data.append(row_data)
 
         # Step 3: Create DataFrame
@@ -499,29 +405,56 @@ class ExcelDataExtractor:
         return pl.DataFrame(data, schema=headers, orient="row")
 
     def _find_header_row_in_sheet(
-        self, sheet, required_columns: List[str], max_search_rows: int = 100
-    ) -> Optional[int]:
+        self,
+        sheet: Worksheet,
+        required_columns: list[str],
+    ) -> int:
         """
         Find row containing all required column headers.
 
         Args:
             sheet: Worksheet object
             required_columns: List of column names to find
-            max_search_rows: Maximum rows to search
 
         Returns:
-            Row number (1-indexed) or None if not found
-        """
-        search_limit = min(max_search_rows, sheet.max_row)
+            Row number (1-indexed)
 
-        for row_idx in range(1, search_limit + 1):
-            # Get all non-empty values in this row
+        Raises:
+            TableNotFoundError: If no row contains all required columns
+            MultipleTablesFoundError: If multiple rows match the required columns
+            ExcelDataExtractorError: If required columns appear more than once in the matched row
+        """
+        matching_rows: list[int] = []
+
+        for row_idx in range(1, sheet.max_row + 1):
             row_values = [
                 cell.value for cell in sheet[row_idx] if cell.value is not None
             ]
-
-            # Check if all required columns are present
             if all(col in row_values for col in required_columns):
-                return row_idx
+                matching_rows.append(row_idx)
 
-        return None
+        if not matching_rows:
+            raise TableNotFoundError(
+                f"Could not find table with columns: {required_columns} "
+                f"in sheet '{sheet.title}'"
+            )
+
+        if len(matching_rows) > 1:
+            raise MultipleTablesFoundError(
+                f"Required columns {required_columns} were found in multiple rows: {matching_rows}. "
+                f"Cannot determine which table to extract.",
+                found_in=[str(r) for r in matching_rows],
+            )
+
+        matched_row = matching_rows[0]
+        row_values = [
+            cell.value for cell in sheet[matched_row] if cell.value is not None
+        ]
+        duplicates = [col for col in required_columns if row_values.count(col) > 1]
+        if duplicates:
+            raise ExcelTableReaderError(
+                f"Columns {duplicates} appear more than once in row {matched_row}. "
+                f"Cannot determine which column to use."
+            )
+
+        return matched_row

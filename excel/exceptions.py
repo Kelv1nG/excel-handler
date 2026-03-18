@@ -27,15 +27,23 @@ class ExcelCorruptedError(ExcelError):
 class TemplateReadError(Exception):
     """When reading marked cells"""
 
+    pass
+
 
 # table related errors
-class ExcelDataExtractorError(ExcelError):
-    """Base exception for ExcelDataExtractor."""
+class ExcelTableReaderError(ExcelError):
+    """Base exception for ExcelTableReader."""
 
     pass
 
 
-class TableNotFoundError(ExcelDataExtractorError):
+class TableNotFoundError(ExcelTableReaderError):
     """Table with specified criteria not found."""
 
     pass
+
+
+class MultipleTablesFoundError(ExcelTableReaderError):
+    """Multiple table match found"""
+
+    def __init__(self, message: str, found_in: list[str]): ...
