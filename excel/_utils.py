@@ -1,3 +1,4 @@
+from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.workbook import Workbook
 from pathlib import Path
@@ -13,13 +14,13 @@ from excel.exceptions import (
 
 
 def load_excel_workbook(
-    filepath: Union[str, os.PathLike], read_only: bool = False, data_only: bool = False
+    filepath: Union[str, os.PathLike, bytes], read_only: bool = False, data_only: bool = False
 ) -> Workbook:
     """
     Load Excel workbook with error handling.
 
     Args:
-        filepath: Path to Excel file
+        filepath: Path to Excel file or raw bytes (e.g., from an email attachment)
         read_only: Open in read-only mode (faster, less memory)
         data_only: Read cell values only, not formulas
 
@@ -36,6 +37,12 @@ def load_excel_workbook(
         >>> sheet = wb['Sheet1']
         >>> wb.close()
     """
+    if isinstance(filepath, bytes):
+        try:
+            return load_workbook(BytesIO(filepath), read_only=read_only, data_only=data_only)
+        except Exception as e:
+            raise ExcelCorruptedError("Invalid or corrupted Excel bytes") from e
+
     filepath = Path(filepath)
 
     try:
