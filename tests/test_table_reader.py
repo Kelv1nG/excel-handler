@@ -69,13 +69,15 @@ class TestExtractByColumnNames:
         assert set(df.columns) == {"Name", "Amount", "Category"}
         assert len(df) == 3
 
-    def test_exact_columns_raises_when_extra_columns(self, simple_table_path):
-        """exact_columns=True raises when the table has more columns than listed."""
+    def test_exact_columns_filters_to_requested_columns(self, simple_table_path):
+        """exact_columns=True returns only the requested columns, discarding extras."""
         with ExcelTableReader(simple_table_path) as reader:
-            with pytest.raises(TableNotFoundError):
-                reader.extract_table_by_column_names(
-                    ["Name", "Amount"], exact_columns=True
-                )
+            df = reader.extract_table_by_column_names(
+                ["Name", "Amount"], exact_columns=True
+            )
+        assert list(df.columns) == ["Name", "Amount"]
+        assert "Category" not in df.columns
+        assert len(df) == 3
 
 
 # ==================== extract_table_by_column_names_from_sheet ====================
@@ -112,13 +114,15 @@ class TestExtractByColumnNamesFromSheet:
             )
         assert set(df.columns) == {"Name", "Amount", "Category"}
 
-    def test_exact_columns_raises_when_extra_columns(self, simple_table_path):
-        """exact_columns=True raises when the sheet table has extra columns."""
+    def test_exact_columns_filters_to_requested_columns(self, simple_table_path):
+        """exact_columns=True returns only the requested columns, discarding extras."""
         with ExcelTableReader(simple_table_path) as reader:
-            with pytest.raises(TableNotFoundError):
-                reader.extract_table_by_column_names_from_sheet(
-                    ["Name", "Amount"], sheet_name="Sheet1", exact_columns=True
-                )
+            df = reader.extract_table_by_column_names_from_sheet(
+                ["Name", "Amount"], sheet_name="Sheet1", exact_columns=True
+            )
+        assert list(df.columns) == ["Name", "Amount"]
+        assert "Category" not in df.columns
+        assert len(df) == 3
 
 
 # ==================== extract_table_by_range ====================

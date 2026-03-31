@@ -79,9 +79,9 @@ class ExcelTableReader:
         Args:
             column_names: Column names that must all appear together in a
                 header row.
-            exact_columns: If ``True``, raise ``TableNotFoundError`` when the
-                detected table contains columns beyond those in *column_names*.
-                If ``False`` (default), extra columns are included in the result.
+            exact_columns: If ``True``, return only the columns in *column_names*,
+                in the order given, discarding any extra columns in the detected
+                range.  If ``False`` (default), all detected columns are returned.
             unmerge_cells: Expand merged cells before extraction.
             fill_forward: Forward-fill null values after extraction.
 
@@ -89,8 +89,7 @@ class ExcelTableReader:
             Polars DataFrame of the matched table.
 
         Raises:
-            TableNotFoundError: No sheet contains a row with all *column_names*,
-                or ``exact_columns=True`` and no sheet has an exact column set match.
+            TableNotFoundError: No sheet contains a row with all *column_names*.
             MultipleTablesFoundError: More than one row matches across all sheets.
         """
         for sheet_name in self.wb.sheetnames:
@@ -125,14 +124,15 @@ class ExcelTableReader:
         *column_names* are used as a mandatory subset to locate the table — all
         listed columns must be present in the same header row.  By default
         (``exact_columns=False``) the returned DataFrame contains every column
-        in the detected range.  Set ``exact_columns=True`` to require the table
-        to have no extra columns beyond those listed.
+        in the detected range.  Set ``exact_columns=True`` to return only the
+        columns in *column_names*, discarding any extras.
 
         Args:
             column_names: Column names that must all appear in the header row.
             sheet_name: Sheet to search.
-            exact_columns: If ``True``, raise ``TableNotFoundError`` when the
-                detected table has columns beyond those in *column_names*.
+            exact_columns: If ``True``, return only the columns in *column_names*,
+                in the order given.  If ``False`` (default), all detected columns
+                are returned.
             unmerge_cells: Expand merged cells before extraction.
             fill_forward: Forward-fill null values after extraction.
 
@@ -140,8 +140,7 @@ class ExcelTableReader:
             Polars DataFrame of the matched table.
 
         Raises:
-            TableNotFoundError: Sheet does not contain all *column_names*, or
-                ``exact_columns=True`` and the table has extra columns.
+            TableNotFoundError: Sheet does not contain all *column_names*.
             MultipleTablesFoundError: More than one header row matches.
             ExcelTableReaderError: Sheet does not exist, or a column in
                 *column_names* appears more than once in the header row.
@@ -156,28 +155,23 @@ class ExcelTableReader:
             column_names,
         )
 
-        # Find the leftmost column that contains any cell value in the header row
-        start_col = next(
-            cell.column
+        # Find the leftmost column among the matched column_names in the header row
+        col_positions = {
+            cell.value: cell.column
             for cell in sheet[header_row]
-            if cell.value is not None and cell.value != ""
-        )
+            if cell.value in set(column_names)
+        }
+        start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
             sheet, header_row, start_col, has_headers=True
         )
-        self._check_no_duplicate_columns(sheet, header_row, column_names, boundaries[1], boundaries[3])
+        # Extend max_col to cover any requested column beyond the auto-detected
+        # right boundary (handles non-contiguous headers separated by gaps).
+        rightmost_requested = max(col_positions.values())
+        min_row, min_col, max_row, max_col = boundaries
+        boundaries = (min_row, min_col, max_row, max(max_col, rightmost_requested))
 
-        if exact_columns:
-            detected_headers = [
-                str(sheet.cell(header_row, col).value)
-                for col in range(boundaries[1], boundaries[3] + 1)
-            ]
-            if set(detected_headers) != set(column_names):
-                extra = set(detected_headers) - set(column_names)
-                raise TableNotFoundError(
-                    f"exact_columns=True: table in sheet '{sheet_name}' has extra "
-                    f"columns {sorted(extra)} beyond {column_names}."
-                )
+        self._check_no_duplicate_columns(sheet, header_row, column_names, boundaries[1], boundaries[3])
 
         df = self._extract_range_from_sheet(
             sheet,
@@ -188,6 +182,9 @@ class ExcelTableReader:
 
         if fill_forward and len(df) > 0:
             df = df.with_columns([pl.col(col).forward_fill() for col in df.columns])
+
+        if exact_columns:
+            df = df.select(column_names)
 
         return df
 
@@ -398,8 +395,9 @@ class ExcelTableReader:
             sheet: Sheet name (REQUIRED).
             ref_cell: A1 address to start scanning from (e.g. ``"B2"``).
             keyword: Exact cell value to use as the anchor (e.g. ``"Sales"``).
-            exact_columns: If ``True``, raise ``TableNotFoundError`` when the
-                detected table has columns beyond those in *column_names*.
+            exact_columns: If ``True``, return only the columns in *column_names*,
+                in the order given.  If ``False`` (default), all detected columns
+                are returned.
             unmerge_cells: Unmerge cells before extraction.
             fill_forward: Forward-fill null values after extraction.
             stop_at: Stop when any cell in the row equals this value,
@@ -413,8 +411,7 @@ class ExcelTableReader:
         Raises:
             ValueError: If both or neither of *ref_cell* / *keyword* are given,
                 or if both *stop_at* and *stop_before* are given.
-            TableNotFoundError: If the anchor or the column headers are not found,
-                or ``exact_columns=True`` and the table has extra columns.
+            TableNotFoundError: If the anchor or the column headers are not found.
             MultipleTablesFoundError: If *keyword* or the header row matches more
                 than once.
         """
@@ -458,28 +455,23 @@ class ExcelTableReader:
             sheet_obj, column_names, start_row=anchor_row
         )
 
-        start_col = next(
-            cell.column
+        col_positions = {
+            cell.value: cell.column
             for cell in sheet_obj[header_row]
-            if cell.value is not None and cell.value != ""
-        )
+            if cell.value in set(column_names)
+        }
+        start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
             sheet_obj, header_row, start_col, has_headers=True,
             stop_at=stop_at, stop_before=stop_before,
         )
-        self._check_no_duplicate_columns(sheet_obj, header_row, column_names, boundaries[1], boundaries[3])
+        # Extend max_col to cover any requested column beyond the auto-detected
+        # right boundary (handles non-contiguous headers separated by gaps).
+        rightmost_requested = max(col_positions.values())
+        min_row, min_col, max_row, max_col = boundaries
+        boundaries = (min_row, min_col, max_row, max(max_col, rightmost_requested))
 
-        if exact_columns:
-            detected_headers = [
-                str(sheet_obj.cell(header_row, col).value)
-                for col in range(boundaries[1], boundaries[3] + 1)
-            ]
-            if set(detected_headers) != set(column_names):
-                extra = set(detected_headers) - set(column_names)
-                raise TableNotFoundError(
-                    f"exact_columns=True: table in sheet '{sheet}' has extra "
-                    f"columns {sorted(extra)} beyond {column_names}."
-                )
+        self._check_no_duplicate_columns(sheet_obj, header_row, column_names, boundaries[1], boundaries[3])
 
         df = self._extract_range_from_sheet(
             sheet_obj,
@@ -490,6 +482,9 @@ class ExcelTableReader:
 
         if fill_forward and len(df) > 0:
             df = df.with_columns([pl.col(col).forward_fill() for col in df.columns])
+
+        if exact_columns:
+            df = df.select(column_names)
 
         return df
 
