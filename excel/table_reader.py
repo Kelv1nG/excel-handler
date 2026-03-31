@@ -159,7 +159,7 @@ class ExcelTableReader:
         col_positions = {
             cell.value: cell.column
             for cell in sheet[header_row]
-            if cell.value in set(column_names)
+            if cell.value in set(column_names) and cell.column is not None
         }
         start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
@@ -171,7 +171,9 @@ class ExcelTableReader:
         min_row, min_col, max_row, max_col = boundaries
         boundaries = (min_row, min_col, max_row, max(max_col, rightmost_requested))
 
-        self._check_no_duplicate_columns(sheet, header_row, column_names, boundaries[1], boundaries[3])
+        self._check_no_duplicate_columns(
+            sheet, header_row, column_names, boundaries[1], boundaries[3]
+        )
 
         df = self._extract_range_from_sheet(
             sheet,
@@ -348,12 +350,16 @@ class ExcelTableReader:
         if unmerge_cells:
             self._unmerge_and_fill_sheet(sheet_obj)
 
-
         start_row, start_col = coordinate_to_tuple(start_cell)
 
         boundaries = self._detect_boundaries_in_sheet(
-            sheet_obj, start_row, start_col, has_headers, max_empty_rows,
-            stop_at=stop_at, stop_before=stop_before,
+            sheet_obj,
+            start_row,
+            start_col,
+            has_headers,
+            max_empty_rows,
+            stop_at=stop_at,
+            stop_before=stop_before,
         )
 
         df = self._extract_range_from_sheet(
@@ -433,6 +439,8 @@ class ExcelTableReader:
                 for row in sheet_obj.iter_rows()
                 for cell in row
                 if cell.value == keyword
+                and cell.row is not None
+                and cell.column is not None
             ]
             if len(matches) == 0:
                 raise TableNotFoundError(
@@ -441,8 +449,7 @@ class ExcelTableReader:
                 )
             if len(matches) > 1:
                 locations = [
-                    f"{sheet}!{sheet_obj.cell(r, c).coordinate}"
-                    for r, c in matches
+                    f"{sheet}!{sheet_obj.cell(r, c).coordinate}" for r, c in matches
                 ]
                 raise MultipleTablesFoundError(
                     f"Multiple cells with value {keyword!r} found in sheet "
@@ -458,12 +465,16 @@ class ExcelTableReader:
         col_positions = {
             cell.value: cell.column
             for cell in sheet_obj[header_row]
-            if cell.value in set(column_names)
+            if cell.value in set(column_names) and cell.column is not None
         }
         start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
-            sheet_obj, header_row, start_col, has_headers=True,
-            stop_at=stop_at, stop_before=stop_before,
+            sheet_obj,
+            header_row,
+            start_col,
+            has_headers=True,
+            stop_at=stop_at,
+            stop_before=stop_before,
         )
         # Extend max_col to cover any requested column beyond the auto-detected
         # right boundary (handles non-contiguous headers separated by gaps).
@@ -471,7 +482,9 @@ class ExcelTableReader:
         min_row, min_col, max_row, max_col = boundaries
         boundaries = (min_row, min_col, max_row, max(max_col, rightmost_requested))
 
-        self._check_no_duplicate_columns(sheet_obj, header_row, column_names, boundaries[1], boundaries[3])
+        self._check_no_duplicate_columns(
+            sheet_obj, header_row, column_names, boundaries[1], boundaries[3]
+        )
 
         df = self._extract_range_from_sheet(
             sheet_obj,
@@ -500,8 +513,7 @@ class ExcelTableReader:
     ) -> None:
         """Raise if any column in *column_names* appears more than once within [min_col, max_col]."""
         row_values = [
-            sheet.cell(header_row, col).value
-            for col in range(min_col, max_col + 1)
+            sheet.cell(header_row, col).value for col in range(min_col, max_col + 1)
         ]
         duplicates = [col for col in column_names if row_values.count(col) > 1]
         if duplicates:
@@ -625,8 +637,7 @@ class ExcelTableReader:
 
         for row in range(data_start_row, sheet.max_row + 1):
             row_values = [
-                sheet.cell(row, col).value
-                for col in range(start_col, max_col + 1)
+                sheet.cell(row, col).value for col in range(start_col, max_col + 1)
             ]
 
             if use_anchor:
