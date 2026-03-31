@@ -100,6 +100,10 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     n_tmpl = last_tmpl_row - tag_row + 1
     headers = _read_headers(ws, header_row, tag_col)
 
+    # Clear the tag placeholder before any data writes so the data loop
+    # can overwrite (tag_row, tag_col) with the correct value.
+    ws.cell(tag_row, tag_col).value = None
+
     if join_mode == "right":
         df_list = df.to_dicts()
         n_df = len(df_list)
@@ -151,9 +155,6 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
                     for col_name, col_idx in headers:
                         ws.cell(ws_row, col_idx).value = row.get(col_name)
-
-    # Clear the tag placeholder cell
-    ws.cell(tag_row, tag_col).value = None
 
 
 class ExcelTemplateWriter:
