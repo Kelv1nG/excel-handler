@@ -33,7 +33,52 @@ def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None]:
 
 def _copy_row_styles(ws, source_row: int, count: int) -> None:
     """Insert *count* rows below *source_row*, copying values and styles from it."""
+    # Snapshot merged ranges before insert — openpyxl's insert_rows() auto-extends
+    # any merged range that spans the insertion point, which would incorrectly
+    # merge the newly inserted data rows.
+    saved_merges = [
+        (m.min_row, m.min_col, m.max_row, m.max_col)
+        for m in ws.merged_cells.ranges
+    ]
+
     ws.insert_rows(source_row + 1, count)
+
+    # Undo openpyxl's automatic adjustments and re-apply with correct logic:
+    #   - Ranges entirely at or above source_row → unchanged
+    #   - Ranges entirely below source_row → shift down by count
+    #   - Ranges spanning source_row → split into top / bottom halves,
+    #     leaving the newly inserted rows unmerged
+    for m in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(m))
+
+    for min_r, min_c, max_r, max_c in saved_merges:
+        if max_r <= source_row:
+            ws.merge_cells(
+                start_row=min_r, start_column=min_c,
+                end_row=max_r, end_column=max_c,
+            )
+        elif min_r > source_row:
+            ws.merge_cells(
+                start_row=min_r + count, start_column=min_c,
+                end_row=max_r + count, end_column=max_c,
+            )
+        else:
+            # Top portion (min_r … source_row) — keep only if multi-cell
+            if source_row > min_r or max_c > min_c:
+                ws.merge_cells(
+                    start_row=min_r, start_column=min_c,
+                    end_row=source_row, end_column=max_c,
+                )
+            # Bottom portion (rows that were below source_row, now shifted)
+            if max_r > source_row:
+                bottom_start = source_row + count + 1
+                bottom_end = max_r + count
+                if bottom_end > bottom_start or max_c > min_c:
+                    ws.merge_cells(
+                        start_row=bottom_start, start_column=min_c,
+                        end_row=bottom_end, end_column=max_c,
+                    )
+
     for offset in range(1, count + 1):
         for col in range(1, ws.max_column + 1):
             src = ws.cell(source_row, col)
