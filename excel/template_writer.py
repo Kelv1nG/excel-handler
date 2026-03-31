@@ -98,58 +98,59 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
 
     ws.insert_rows(source_row + 1, count)
 
-    # Undo openpyxl's automatic adjustments and re-apply with correct logic:
-    #   - Ranges entirely at or above source_row → unchanged
-    #   - Ranges entirely below source_row → shift down by count
-    #   - Ranges spanning source_row → split into top / bottom halves,
-    #     leaving the newly inserted rows unmerged
-    for m in list(ws.merged_cells.ranges):
-        ws.unmerge_cells(str(m))
-
-    for min_r, min_c, max_r, max_c in saved_merges:
-        if max_r <= source_row:
-            ws.merge_cells(
-                start_row=min_r, start_column=min_c,
-                end_row=max_r, end_column=max_c,
-            )
-        elif min_r > source_row:
-            ws.merge_cells(
-                start_row=min_r + count, start_column=min_c,
-                end_row=max_r + count, end_column=max_c,
-            )
-        else:
-            # Top portion (min_r … source_row) — keep only if multi-cell
-            if source_row > min_r or max_c > min_c:
-                ws.merge_cells(
-                    start_row=min_r, start_column=min_c,
-                    end_row=source_row, end_column=max_c,
-                )
-            # Bottom portion (rows that were below source_row, now shifted)
-            if max_r > source_row:
-                bottom_start = source_row + count + 1
-                bottom_end = max_r + count
-                if bottom_end > bottom_start or max_c > min_c:
-                    ws.merge_cells(
-                        start_row=bottom_start, start_column=min_c,
-                        end_row=bottom_end, end_column=max_c,
-                    )
-
-    # Safety: ensure no merge overlaps the inserted rows.  openpyxl can leave
-    # phantom MergedCell objects when insert_rows touches an existing merge
-    # boundary, causing cells to appear merged in the output.
+    # insert_rows() correctly shifts merges that are fully above or fully
+    # below the insertion point.  The only merges we must fix manually are
+    # those that SPAN source_row (min_row <= source_row < max_row): openpyxl
+    # auto-extends their max_row by `count`, which is wrong.  We split them
+    # into a top portion (min_row…source_row) and a bottom portion
+    # (source_row+count+1…original_max_row+count), leaving the inserted rows
+    # unmerged.  Touching every other merge is unnecessary and was the root
+    # cause of distant merged cells being nuked.
     inserted_start = source_row + 1
     inserted_end = source_row + count
+
+    from openpyxl.cell.cell import MergedCell as _MC
+
+    for min_r, min_c, max_r, max_c in saved_merges:
+        # Only spanning merges need manual correction.
+        if not (min_r <= source_row < max_r):
+            continue
+
+        # Unmerge the auto-extended range openpyxl created after insert_rows.
+        # Match by coordinates to avoid string representation mismatches.
+        for existing_m in list(ws.merged_cells.ranges):
+            if (existing_m.min_row == min_r and existing_m.min_col == min_c
+                    and existing_m.max_row == max_r + count
+                    and existing_m.max_col == max_c):
+                ws.unmerge_cells(str(existing_m))
+                break
+
+        # Top portion: min_r … source_row (only if multi-cell range)
+        if source_row > min_r or max_c > min_c:
+            ws.merge_cells(
+                start_row=min_r, start_column=min_c,
+                end_row=source_row, end_column=max_c,
+            )
+        # Bottom portion: rows that were originally below source_row, now
+        # shifted down by count.
+        if max_r > source_row:
+            bottom_start = source_row + count + 1
+            bottom_end = max_r + count
+            if bottom_end >= bottom_start:
+                ws.merge_cells(
+                    start_row=bottom_start, start_column=min_c,
+                    end_row=bottom_end, end_column=max_c,
+                )
+
+    # Safety: strip any merge that still overlaps the inserted rows.
     for m in list(ws.merged_cells.ranges):
         if m.min_row <= inserted_end and m.max_row >= inserted_start:
             ws.unmerge_cells(str(m))
 
-    # After unmerging, openpyxl leaves MergedCell ghost objects in ws._cells.
-    # These silently ignore style writes (.font, .alignment, etc.).  Purge
-    # them so the next ws.cell() call creates fresh, writable Cell objects.
-    # Include source_row: insert_rows() can create phantom merges that touch
-    # it, converting real Cells to MergedCell proxies and losing their values.
-    from openpyxl.cell.cell import MergedCell as _MC
-    for r in range(source_row, inserted_end + 1):
+    # Purge MergedCell ghost objects from the inserted rows only.
+    # Ghosts in source_row belong to legitimate top-portion merges and must
+    # NOT be deleted.  Only the freshly inserted rows need clean Cell objects.
+    for r in range(inserted_start, inserted_end + 1):
         for c in list(ws._cells):
             if isinstance(ws._cells.get(c), _MC) and c[0] == r:
                 del ws._cells[c]
