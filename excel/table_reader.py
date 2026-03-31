@@ -66,6 +66,7 @@ class ExcelTableReader:
         exact_columns: bool = False,
         unmerge_cells: bool = True,
         fill_forward: bool = True,
+        skip_empty_cols: bool = False,
     ) -> pl.DataFrame:
         """Search all sheets and return the first table containing *column_names*.
 
@@ -100,6 +101,7 @@ class ExcelTableReader:
                     exact_columns,
                     unmerge_cells,
                     fill_forward,
+                    skip_empty_cols,
                 )
             except TableNotFoundError:
                 continue
@@ -118,6 +120,7 @@ class ExcelTableReader:
         exact_columns: bool = False,
         unmerge_cells: bool = True,
         fill_forward: bool = True,
+        skip_empty_cols: bool = False,
     ) -> pl.DataFrame:
         """Extract from a specific sheet by matching column names.
 
@@ -155,15 +158,19 @@ class ExcelTableReader:
             column_names,
         )
 
-        # Find the leftmost column among the matched column_names in the header row
-        col_positions = {
-            cell.value: cell.column
-            for cell in sheet[header_row]
-            if cell.value in set(column_names) and cell.column is not None
-        }
+        # Find the leftmost column among the matched column_names in the header row.
+        # Use first occurrence to avoid picking a duplicate table further right.
+        col_positions: dict[str, int] = {}
+        for cell in sheet[header_row]:
+            if (
+                cell.value in set(column_names)
+                and cell.column is not None
+                and cell.value not in col_positions
+            ):
+                col_positions[cell.value] = cell.column
         start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
-            sheet, header_row, start_col, has_headers=True
+            sheet, header_row, start_col, has_headers=True, skip_empty_cols=skip_empty_cols
         )
         # Extend max_col to cover any requested column beyond the auto-detected
         # right boundary (handles non-contiguous headers separated by gaps).
@@ -202,6 +209,7 @@ class ExcelTableReader:
         max_empty_rows: int = 2,
         stop_at: str | None = None,
         stop_before: str | None = None,
+        skip_empty_cols: bool = False,
     ) -> pl.DataFrame:
         """Extract a table from an Excel range string.
 
@@ -283,6 +291,7 @@ class ExcelTableReader:
                 max_empty_rows=max_empty_rows,
                 stop_at=stop_at,
                 stop_before=stop_before,
+                skip_empty_cols=skip_empty_cols,
             )
             max_row = detected_max_row
 
@@ -312,6 +321,7 @@ class ExcelTableReader:
         max_empty_rows: int = 2,
         stop_at: str | None = None,
         stop_before: str | None = None,
+        skip_empty_cols: bool = False,
     ) -> pl.DataFrame:
         """
         Extract table starting from cell, auto-detecting boundaries.
@@ -360,6 +370,7 @@ class ExcelTableReader:
             max_empty_rows,
             stop_at=stop_at,
             stop_before=stop_before,
+            skip_empty_cols=skip_empty_cols,
         )
 
         df = self._extract_range_from_sheet(
@@ -385,6 +396,7 @@ class ExcelTableReader:
         fill_forward: bool = True,
         stop_at: str | None = None,
         stop_before: str | None = None,
+        skip_empty_cols: bool = False,
     ) -> pl.DataFrame:
         """Find and extract a table by scanning from an anchor for matching column headers.
 
@@ -432,7 +444,7 @@ class ExcelTableReader:
             self._unmerge_and_fill_sheet(sheet_obj)
 
         if ref_cell is not None:
-            anchor_row, _ = coordinate_to_tuple(ref_cell)
+            anchor_row, anchor_col = coordinate_to_tuple(ref_cell)
         else:
             matches: list[tuple[int, int]] = [
                 (cell.row, cell.column)
@@ -456,17 +468,23 @@ class ExcelTableReader:
                     f"'{sheet}': {locations}",
                     found_in=locations,
                 )
-            anchor_row, _ = matches[0]
+            anchor_row, anchor_col = matches[0]
 
         header_row = self._find_header_row_in_sheet(
             sheet_obj, column_names, start_row=anchor_row
         )
 
-        col_positions = {
-            cell.value: cell.column
-            for cell in sheet_obj[header_row]
-            if cell.value in set(column_names) and cell.column is not None
-        }
+        # Use first occurrence of each name at or after anchor_col — this ensures
+        # we pick the correct table when duplicate column names exist further left.
+        col_positions: dict[str, int] = {}
+        for cell in sheet_obj[header_row]:
+            if (
+                cell.value in set(column_names)
+                and cell.column is not None
+                and cell.column >= anchor_col
+                and cell.value not in col_positions
+            ):
+                col_positions[cell.value] = cell.column
         start_col = min(col_positions.values())
         boundaries = self._detect_boundaries_in_sheet(
             sheet_obj,
@@ -475,6 +493,7 @@ class ExcelTableReader:
             has_headers=True,
             stop_at=stop_at,
             stop_before=stop_before,
+            skip_empty_cols=skip_empty_cols,
         )
         # Extend max_col to cover any requested column beyond the auto-detected
         # right boundary (handles non-contiguous headers separated by gaps).
@@ -601,6 +620,7 @@ class ExcelTableReader:
         max_empty_rows: int = 2,
         stop_at: str | None = None,
         stop_before: str | None = None,
+        skip_empty_cols: bool = False,
     ) -> tuple[int, int, int, int]:
         """
         Auto-detect table boundaries from a starting point.
@@ -616,6 +636,8 @@ class ExcelTableReader:
                 including that row.
             stop_before: Stop when any cell in the row matches this value,
                 excluding that row.
+            skip_empty_cols: If ``True``, empty cells in the header row do not
+                stop the column scan — scanning continues past them.
 
         Returns:
             Tuple of (min_row, min_col, max_row, max_col)
@@ -625,8 +647,10 @@ class ExcelTableReader:
         for col in range(start_col, min(start_col + 100, sheet.max_column + 1)):
             cell_value = sheet.cell(start_row, col).value
             if cell_value is None or cell_value == "":
-                break
-            max_col = col
+                if not skip_empty_cols:
+                    break
+            else:
+                max_col = col
 
         # Detect bottom boundary (rows)
         data_start_row = start_row + 1 if has_headers else start_row
