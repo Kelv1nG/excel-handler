@@ -743,7 +743,12 @@ class ExcelTableReader:
             # Empty table - return empty DataFrame with schema
             return pl.DataFrame(schema={h: pl.Utf8 for h in headers})
 
-        return pl.DataFrame(data, schema=headers, orient="row")
+        df = pl.DataFrame(data, schema=headers, orient="row")
+
+        # Step 4: Drop rows where every value is null
+        df = df.filter(~pl.all_horizontal(pl.all().is_null()))
+
+        return df
 
     def _find_header_row_in_sheet(
         self,
