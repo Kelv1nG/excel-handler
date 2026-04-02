@@ -50,3 +50,71 @@ def offset_table_path():
 def template_path():
     """Template with {{ }} tags on Sheet1 and Sheet2; EmptySheet has none."""
     return str(FIXTURES_DIR / "template.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_merge_preservation_path():
+    """Template with merged title (A1:C1) and footer (A6:C6) around a table.
+    Used to verify merged cells outside the insertion zone survive outer-join fills.
+    """
+    return str(FIXTURES_DIR / "template_merge_preservation.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_complex_merges_path():
+    """Template with A1:C1 title, a 2x2 merge (A6:B7), and 1x3 footer (A9:C9) below the table."""
+    return str(FIXTURES_DIR / "template_complex_merges.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_tight_footer_path():
+    """Template where the footer merge (A4:C4) sits immediately below the last data row (no separator)."""
+    return str(FIXTURES_DIR / "template_tight_footer.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_left_join_path():
+    """Template with left join tag — no extra rows inserted, merges must be untouched."""
+    return str(FIXTURES_DIR / "template_left_join.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_vertical_merge_path():
+    """Template with a 3-row vertical merge (A5:A7) below last data row, with blank separator."""
+    return str(FIXTURES_DIR / "template_vertical_merge.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_vertical_merge_adjacent_path():
+    """Template with a 3-row vertical merge (A4:A6) immediately below the last data row."""
+    return str(FIXTURES_DIR / "template_vertical_merge_adjacent.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_data_col_vertical_merge_path():
+    """Template with a 3-row vertical merge in a DATA column (B4:B6) at the boundary row.
+
+    Row 4 has A4='Status' (not in DF) and B4:B6 merged as 'Section Header' italic.
+    Tests that _find_last_data_row stops before any multi-row merge (not just
+    join-column merges), so the merge is treated as 'below' and shifts intact.
+    """
+    return str(FIXTURES_DIR / "template_data_col_vertical_merge.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_positional_fill_path():
+    """Template with a {{ data | table(positional=True) }} tag for positional (no-join) filling.
+
+    Sheet has a 2x3 region starting at B3 tagged with table(positional=True).
+    No headers, no join column — the DataFrame is written positionally.
+    """
+    return str(FIXTURES_DIR / "template_positional_fill.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_collision_path():
+    """Template with two {{ table(positional=True) }} tags whose regions overlap.
+
+    Used to verify that ValueError is raised on collision detection.
+    """
+    return str(FIXTURES_DIR / "template_collision.xlsx")
