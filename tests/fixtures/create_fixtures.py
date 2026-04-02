@@ -215,6 +215,264 @@ def create_template():
     print("  template.xlsx")
 
 
+
+
+# ---------------------------------------------------------------------------
+# template_merge_preservation.xlsx
+# Template with:
+#   - A1:C1 merged title cell (bold, centered, wrap_text) ABOVE the table
+#   - A table at rows 3-4 with an outer-join tag
+#   - A6:C6 merged footer cell (italic) BELOW the table
+# Used to verify that merged cells outside the insertion zone survive intact
+# after ExcelTemplateWriter inserts extra outer-join rows.
+# ---------------------------------------------------------------------------
+def create_template_merge_preservation():
+    from openpyxl.styles import Border, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    # Title: A1:C1 merged — bold, centered, wrap_text, light-blue fill
+    ws["A1"] = "Report Title"
+    title_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    thin = Side(style="thin")
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A1"].fill = title_fill
+    ws["A1"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("A1:C1")
+
+    # Headers row 2
+    ws["A2"] = "Index"
+    ws["B2"] = "col1"
+    ws["C2"] = "col2"
+    _header_style(ws, 2, range(1, 4))
+
+    # Data rows 3-4 with outer-join tag in B3
+    ws["A3"] = "a"
+    ws["B3"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A4"] = "b"
+
+    # Empty row 5 (separator)
+
+    # Footer: A6:C6 merged — italic
+    ws["A6"] = "Footer Note"
+    ws["A6"].font = Font(italic=True)
+    ws["A6"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A6:C6")
+
+    wb.save(FIXTURES_DIR / "template_merge_preservation.xlsx")
+    wb.close()
+    print("  template_merge_preservation.xlsx")
+
+# ---------------------------------------------------------------------------
+# template_complex_merges.xlsx
+# Template with:
+#   - A1:C1 merged title ABOVE table (1x3)
+#   - A table at rows 3-4 with outer-join tag
+#   - A6:B7 merged 2x2 "BigNote" BELOW table
+#   - A9:C9 merged 1x3 "Footer2" BELOW 2x2 merge
+# Tests: multiple merges of different shapes all shift correctly on multi-insert
+# ---------------------------------------------------------------------------
+def create_template_complex_merges():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Complex Report"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A1"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("A1:C1")
+
+    ws["A2"] = "Index"
+    ws["B2"] = "col1"
+    ws["C2"] = "col2"
+    _header_style(ws, 2, range(1, 4))
+
+    ws["A3"] = "a"
+    ws["B3"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A4"] = "b"
+
+    # 2x2 merge at A6:B7
+    ws["A6"] = "BigNote"
+    ws["A6"].font = Font(bold=True, italic=True)
+    ws["A6"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.merge_cells("A6:B7")
+
+    # Footer at A9:C9
+    ws["A9"] = "Footer2"
+    ws["A9"].font = Font(italic=True, color="FF0000")
+    ws["A9"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A9:C9")
+
+    wb.save(FIXTURES_DIR / "template_complex_merges.xlsx")
+    wb.close()
+    print("  template_complex_merges.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_tight_footer.xlsx
+# Footer merge immediately below last data row (no blank separator).
+# ---------------------------------------------------------------------------
+def create_template_tight_footer():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A3"] = "b"
+
+    # Footer immediately at row 4 (no separator)
+    ws["A4"] = "Tight Footer"
+    ws["A4"].font = Font(italic=True)
+    ws["A4"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A4:C4")
+
+    wb.save(FIXTURES_DIR / "template_tight_footer.xlsx")
+    wb.close()
+    print("  template_tight_footer.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_left_join.xlsx
+# Left join — no row insertion happens. Merges must be completely untouched.
+# ---------------------------------------------------------------------------
+def create_template_left_join():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Left Join Report"
+    ws["A1"].font = Font(bold=True)
+    ws["A1"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("A1:C1")
+
+    ws["A2"] = "Index"
+    ws["B2"] = "col1"
+    ws["C2"] = "col2"
+    _header_style(ws, 2, range(1, 4))
+
+    ws["A3"] = "a"
+    ws["B3"] = "{{ data | table(join=left, on=Index) }}"
+    ws["A4"] = "b"
+
+    ws["A6"] = "Left Join Footer"
+    ws["A6"].font = Font(italic=True, bold=True)
+    ws["A6"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A6:C6")
+
+    wb.save(FIXTURES_DIR / "template_left_join.xlsx")
+    wb.close()
+    print("  template_left_join.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_vertical_merge.xlsx
+# Table with a 3-row vertical merge (A5:A7) immediately below the last data
+# row (A4 is blank separator, A5:A7 = "Status" italic).
+# Used to verify that the vertical merge is correctly shifted down (not split)
+# when outer join inserts extra rows.
+# Variant 2: merge IMMEDIATELY adjacent (no blank separator) at A4:A6.
+# ---------------------------------------------------------------------------
+def create_template_vertical_merge():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    # Headers
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    # Data rows
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A3"] = "b"
+
+    # Row 4: blank separator
+
+    # Vertical 3-row merge below the table
+    ws["A5"] = "Status"
+    ws["A5"].font = Font(italic=True)
+    ws["A5"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("A5:A7")
+
+    wb.save(FIXTURES_DIR / "template_vertical_merge.xlsx")
+    wb.close()
+    print("  template_vertical_merge.xlsx")
+
+
+def create_template_vertical_merge_adjacent():
+    """Vertical merge immediately below the last data row (no blank separator)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A3"] = "b"
+
+    # Vertical 3-row merge IMMEDIATELY after last data row
+    ws["A4"] = "Status"
+    ws["A4"].font = Font(italic=True)
+    ws["A4"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("A4:A6")
+
+    wb.save(FIXTURES_DIR / "template_vertical_merge_adjacent.xlsx")
+    wb.close()
+    print("  template_vertical_merge_adjacent.xlsx")
+
+
+def create_template_data_col_vertical_merge():
+    """Vertical 3-row merge in a DATA column (not join col) at the boundary row.
+
+    Template:
+      Row 1: headers
+      Row 2: a  {{tag|outer}}
+      Row 3: b
+      Row 4: Status (A4, not in DF)  +  B4:B6 = "Section Header" italic merge
+
+    _find_last_data_row must stop at row 3 (before the merge at row 4) so
+    that _copy_row_styles uses source_row=3, making B4:B6 a "below" merge
+    that shifts down intact (to B5:B7 after 1 insertion, or B6:B8 for 2, etc.)
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index) }}"
+    ws["A3"] = "b"
+
+    # Row 4: join col has a value NOT in DF, data col has 3-row merge
+    ws["A4"] = "Status"
+    ws["B4"] = "Section Header"
+    ws["B4"].font = Font(italic=True)
+    ws["B4"].alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.merge_cells("B4:B6")
+
+    wb.save(FIXTURES_DIR / "template_data_col_vertical_merge.xlsx")
+    wb.close()
+    print("  template_data_col_vertical_merge.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -225,4 +483,11 @@ if __name__ == "__main__":
     create_empty_table()
     create_offset_table()
     create_template()
+    create_template_merge_preservation()
+    create_template_complex_merges()
+    create_template_tight_footer()
+    create_template_left_join()
+    create_template_vertical_merge()
+    create_template_vertical_merge_adjacent()
+    create_template_data_col_vertical_merge()
     print("Done.")
