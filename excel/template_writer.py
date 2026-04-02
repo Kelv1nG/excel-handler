@@ -4,6 +4,7 @@ import re
 from copy import copy
 from os import PathLike
 
+from openpyxl.cell.cell import MergedCell as _MC
 from openpyxl.utils import coordinate_to_tuple
 
 from typing import Any
@@ -27,12 +28,18 @@ def _is_table(cell: MarkedCell) -> bool:
     return cell.parse_metadata().get("type") == "table"
 
 
-def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None]:
-    """Return (join_mode, on_col_override_or_None). Default join mode is 'left'."""
+def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None, bool]:
+    """Return (join_mode, on_col_override_or_None, positional).
+
+    *positional* is True when ``table(positional=True)`` is used — rows/columns
+    are written by position with no join column or header matching.
+    Default join mode is 'left'.
+    """
     meta = cell.parse_metadata()
+    positional = bool(meta.get("positional", False))
     join_mode = str(meta.get("join", "left"))
     on_col = str(meta["on"]) if "on" in meta else None
-    return join_mode, on_col
+    return join_mode, on_col, positional
 
 
 def _get_style_source(ws, row: int, col: int):
@@ -68,6 +75,55 @@ def _get_merged_cell_value(ws, row: int, col: int) -> Any:
     return None
 
 
+def _safe_remove_merge(ws, merge_range) -> None:
+    """Remove a merged range from the registry without crashing on missing cells.
+
+    openpyxl's ws.unmerge_cells() deletes all cell objects inside the range
+    from ws._cells.  After insert_rows() the cell objects may have already been
+    moved or may never have existed as real cells, causing a KeyError.  This
+    helper removes the range from the registry directly and then purges only the
+    MergedCell proxy objects that actually exist in ws._cells, so the caller can
+    safely follow up with ws.merge_cells() or write values.
+    """
+    ws.merged_cells.ranges.discard(merge_range)
+    for r in range(merge_range.min_row, merge_range.max_row + 1):
+        for c in range(merge_range.min_col, merge_range.max_col + 1):
+            cell = ws._cells.get((r, c))
+            if isinstance(cell, _MC):
+                del ws._cells[(r, c)]
+
+
+def _sync_merges_after_delete(ws, deleted_row: int) -> None:
+    """Correct the merged-cells registry after ``delete_rows()``.
+
+    openpyxl 3.x shifts cell *data* when rows are deleted but does **not**
+    update the merged-cells registry.  Every merge whose ``min_row`` is
+    greater than ``deleted_row`` ends up pointing one row too high.  This
+    helper removes each stale entry and re-registers it at the correct
+    post-delete position so that subsequent operations (especially
+    ``_copy_row_styles``) see accurate row numbers.
+    """
+    updated: list[tuple[int, int, int, int]] = []
+    for m in list(ws.merged_cells.ranges):
+        if m.max_row < deleted_row:
+            continue  # fully above the deleted row — no change needed
+        _safe_remove_merge(ws, m)
+        if m.min_row > deleted_row:
+            # Fully below: shift both bounds up by 1
+            updated.append((m.min_row - 1, m.min_col, m.max_row - 1, m.max_col))
+        elif m.max_row >= deleted_row:
+            # Spans the deleted row: shrink max_row by 1
+            new_max = m.max_row - 1
+            if new_max >= m.min_row:
+                updated.append((m.min_row, m.min_col, new_max, m.max_col))
+            # else: merge collapses to nothing — just discard
+    for min_r, min_c, max_r, max_c in updated:
+        ws.merge_cells(
+            start_row=min_r, start_column=min_c,
+            end_row=max_r, end_column=max_c,
+        )
+
+
 def _copy_row_styles(ws, source_row: int, count: int) -> None:
     """Insert *count* rows below *source_row*, copying values and styles from it."""
     # Snapshot merged ranges before insert — openpyxl's insert_rows() auto-extends
@@ -96,43 +152,103 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
                 "alignment": copy(style_cell.alignment),
             }
 
+    # Snapshot styles AND values for merged cells BELOW source_row before
+    # insert_rows() shifts them.  We save values here (from the real Cell
+    # top-left) because after insert_rows() openpyxl may leave a MergedCell
+    # ghost at the shifted position, making .value read-only and returning None.
+    merged_cell_styles: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+    merged_cell_values: dict[tuple[int, int, int, int], Any] = {}
+    for m in ws.merged_cells.ranges:
+        if m.min_row >= source_row:  # >= captures merges starting exactly at source_row
+            key = (m.min_row, m.min_col, m.max_row, m.max_col)
+            merged_cell_values[key] = ws.cell(m.min_row, m.min_col).value
+            style_cell = ws.cell(m.min_row, m.min_col)
+            if style_cell.has_style:
+                merged_cell_styles[key] = {
+                    "font": copy(style_cell.font),
+                    "border": copy(style_cell.border),
+                    "fill": copy(style_cell.fill),
+                    "number_format": style_cell.number_format,
+                    "protection": copy(style_cell.protection),
+                    "alignment": copy(style_cell.alignment),
+                }
+
     ws.insert_rows(source_row + 1, count)
 
-    # insert_rows() correctly shifts merges that are fully above or fully
-    # below the insertion point.  The only merges we must fix manually are
-    # those that SPAN source_row (min_row <= source_row < max_row): openpyxl
-    # auto-extends their max_row by `count`, which is wrong.  We split them
-    # into a top portion (min_row…source_row) and a bottom portion
-    # (source_row+count+1…original_max_row+count), leaving the inserted rows
-    # unmerged.  Touching every other merge is unnecessary and was the root
-    # cause of distant merged cells being nuked.
+    # insert_rows() correctly shifts merges fully above or below the insertion
+    # point.  The only merges we must fix manually are those that SPAN
+    # source_row (min_row <= source_row < max_row): openpyxl auto-extends their
+    # max_row by `count`, which is wrong.  We split them into a top portion
+    # (min_row…source_row) and a bottom portion (source_row+count+1…max_row+count),
+    # leaving the inserted rows unmerged.
     inserted_start = source_row + 1
     inserted_end = source_row + count
 
-    from openpyxl.cell.cell import MergedCell as _MC
-
     for min_r, min_c, max_r, max_c in saved_merges:
+        if min_r > source_row:
+            # Merge fully BELOW — insert_rows() has already shifted it to
+            # (min_r+count … max_r+count).  Use the pre-saved value because
+            # the top-left may now be a MergedCell ghost returning None.
+            key = (min_r, min_c, max_r, max_c)
+            saved_value = merged_cell_values.get(key)
+            # openpyxl may keep the original stale range, shift it, or both.
+            # Unmerge any range for these columns at either the original or
+            # the shifted row positions to ensure a clean slate.
+            for existing_m in list(ws.merged_cells.ranges):
+                if (existing_m.min_col == min_c
+                        and existing_m.max_col == max_c
+                        and existing_m.min_row in (min_r, min_r + count)
+                        and existing_m.max_row in (max_r, max_r + count)):
+                    _safe_remove_merge(ws, existing_m)
+            # After unmerging, openpyxl may leave a MergedCell ghost in
+            # ws._cells at the target position — the registry unmerge does
+            # not purge the cell object.  Remove it so ws.cell() creates a
+            # fresh writable Cell; otherwise .value = ... raises AttributeError.
+            ws._cells.pop((min_r + count, min_c), None)
+            # Set value BEFORE re-merging (after merge, top-left becomes a
+            # MergedCell with read-only .value)
+            ws.cell(min_r + count, min_c).value = saved_value
+            ws.merge_cells(
+                start_row=min_r + count, start_column=min_c,
+                end_row=max_r + count, end_column=max_c,
+            )
+
+            saved_style = merged_cell_styles.get((min_r, min_c, max_r, max_c))
+            if saved_style:
+                new_top_left = ws.cell(min_r + count, min_c)
+                new_top_left.font = copy(saved_style["font"])
+                new_top_left.border = copy(saved_style["border"])
+                new_top_left.fill = copy(saved_style["fill"])
+                new_top_left.number_format = saved_style["number_format"]
+                new_top_left.protection = copy(saved_style["protection"])
+                new_top_left.alignment = copy(saved_style["alignment"])
+            continue
+
         # Only spanning merges need manual correction.
         if not (min_r <= source_row < max_r):
             continue
 
+        # Use pre-saved snapshot: insert_rows may have created MergedCell
+        # ghosts at min_r that make .value return None.
+        key = (min_r, min_c, max_r, max_c)
+        saved_value = merged_cell_values.get(key) or ws.cell(min_r, min_c).value
+
         # Unmerge the auto-extended range openpyxl created after insert_rows.
-        # Match by coordinates to avoid string representation mismatches.
         for existing_m in list(ws.merged_cells.ranges):
             if (existing_m.min_row == min_r and existing_m.min_col == min_c
                     and existing_m.max_row == max_r + count
                     and existing_m.max_col == max_c):
-                ws.unmerge_cells(str(existing_m))
+                _safe_remove_merge(ws, existing_m)
                 break
 
         # Top portion: min_r … source_row (only if multi-cell range)
         if source_row > min_r or max_c > min_c:
+            ws.cell(min_r, min_c).value = saved_value
             ws.merge_cells(
                 start_row=min_r, start_column=min_c,
                 end_row=source_row, end_column=max_c,
             )
-        # Bottom portion: rows that were originally below source_row, now
-        # shifted down by count.
+        # Bottom portion: rows originally below source_row, shifted by count.
         if max_r > source_row:
             bottom_start = source_row + count + 1
             bottom_end = max_r + count
@@ -145,7 +261,7 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
     # Safety: strip any merge that still overlaps the inserted rows.
     for m in list(ws.merged_cells.ranges):
         if m.min_row <= inserted_end and m.max_row >= inserted_start:
-            ws.unmerge_cells(str(m))
+            _safe_remove_merge(ws, m)
 
     # Purge MergedCell ghost objects from the inserted rows only.
     # Ghosts in source_row belong to legitimate top-portion merges and must
@@ -199,35 +315,33 @@ def _read_headers(ws, header_row: int, start_col: int) -> list[tuple[str, int]]:
     return headers
 
 
-def _find_last_data_row(
-    ws,
-    start_row: int,
-    join_col: int,
-    data_cols: list[int] | None = None,
-) -> int:
+def _find_last_data_row(ws, start_row: int, join_col: int) -> int:
     """Return the last row in join_col with a non-empty value, starting from start_row.
 
-    When *data_cols* is provided the scan also requires at least one of those
-    columns to be non-empty — this prevents stray text below the table (e.g.
-    footnotes that happen to sit in the join column) from being treated as data
-    rows.  The very first row (``start_row``) is always accepted when its join
-    column is non-empty, because it is the tag row and its data columns may
-    contain the ``{{ tag }}`` placeholder which has already been cleared.
+    Stops before a multi-row vertical merge in the join column: such merges
+    are section labels or footers, not individual data rows.  Scanning into
+    the interior of a merge (MergedCell proxies) would inflate last_tmpl_row
+    and cause row insertion to happen after the merge instead of before it.
     """
     last_row = start_row
     row = start_row
     while True:
-        val = _get_merged_cell_value(ws, row, join_col)
+        # MergedCell proxy → we are inside a multi-row merge that started
+        # above; the table ended at the previous row.
+        if isinstance(ws._cells.get((row, join_col)), _MC):
+            break
+        val = ws.cell(row, join_col).value
         if val is None or str(val).strip() == "":
             break
-        # For rows after start_row, verify at least one data column is filled.
-        if data_cols and row > start_row:
-            has_data = any(
-                _get_merged_cell_value(ws, row, c) not in (None, "")
-                for c in data_cols
-            )
-            if not has_data:
-                break
+        # If this row is the TOP of ANY multi-row vertical merge (in any
+        # column), treat it as a structural boundary (section label, footer,
+        # etc.) and stop before including it.  Checking only the join column
+        # was insufficient: a merge in a data column at the same row also
+        # causes source_row == merge.min_row, triggering the spanning split
+        # and losing the merge value / corrupting the merge structure.
+        if any(m.min_row == row and m.max_row > row
+               for m in ws.merged_cells.ranges):
+            return last_row
         last_row = row
         row += 1
     return last_row
@@ -287,6 +401,82 @@ def _find_insert_data_row(ws, start_row: int) -> tuple[int, int] | None:
     return None
 
 
+def _compute_table_region(
+    ws, mc: MarkedCell, df: pl.DataFrame
+) -> tuple[int, int, int, int]:
+    """Return (min_row, min_col, max_row, max_col) of the region a table() tag would write.
+
+    Includes all template rows plus any potential outer-join extra rows.
+    Column span is join_col through the last header column.
+    For ``positional=True`` tables, the region is tag_cell to tag_cell + df shape.
+    """
+    join_mode, _, positional = _parse_table_meta(mc)
+    if positional:
+        start_row, start_col = coordinate_to_tuple(mc.cell_addr)
+        return start_row, start_col, start_row + df.height - 1, start_col + df.width - 1
+    tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
+    join_col = tag_col - 1
+
+    headers = _read_headers(ws, tag_row - 1, tag_col)
+    last_col = headers[-1][1] if headers else tag_col
+    last_row = _find_last_data_row(ws, tag_row, join_col)
+
+    if join_mode in ("outer", "right"):
+        # Worst case: every DF row is extra
+        last_row = max(last_row, tag_row + df.height - 1)
+
+    return tag_row - 1, join_col, last_row, last_col  # include header row
+
+
+def _check_region_collisions(
+    regions: list[tuple[str, tuple[int, int, int, int]]]
+) -> None:
+    """Raise ValueError if any two (sheet, region) pairs overlap.
+
+    Each entry is (description, (min_row, min_col, max_row, max_col)).
+    All entries are assumed to be on the same worksheet.
+    """
+    for i in range(len(regions)):
+        for j in range(i + 1, len(regions)):
+            desc_a, (r1a, c1a, r2a, c2a) = regions[i]
+            desc_b, (r1b, c1b, r2b, c2b) = regions[j]
+            row_overlap = r1a <= r2b and r1b <= r2a
+            col_overlap = c1a <= c2b and c1b <= c2a
+            if row_overlap and col_overlap:
+                raise ValueError(
+                    f"Fill collision on sheet: '{desc_a}' "
+                    f"(rows {r1a}-{r2a}, cols {c1a}-{c2a}) overlaps "
+                    f"'{desc_b}' (rows {r1b}-{r2b}, cols {c1b}-{c2b})"
+                )
+
+
+def _fill_positional(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
+    """Fill a DataFrame positionally starting at the tag cell.
+
+    The tag cell is the top-left corner of the written region.
+    Columns are written left-to-right in DataFrame column order.
+    Rows are written top-to-bottom in DataFrame row order.
+    No join column, no header matching.  The tag cell value is cleared
+    and then overwritten with df[0, 0].
+
+    Raises:
+        ValueError: If the DataFrame has zero rows or zero columns.
+    """
+    if df.height == 0 or df.width == 0:
+        raise ValueError(
+            f"positional table(positional=True) for '{mc.name}' requires a non-empty DataFrame "
+            f"(got {df.height} rows × {df.width} cols)"
+        )
+
+    start_row, start_col = coordinate_to_tuple(mc.cell_addr)
+    ws.cell(start_row, start_col).value = None  # clear the tag
+
+    columns = df.columns
+    for r_offset, row in enumerate(df.iter_rows(named=True)):
+        for c_offset, col_name in enumerate(columns):
+            ws.cell(start_row + r_offset, start_col + c_offset).value = row[col_name]
+
+
 def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     """Fill ws with df data using join semantics described in mc.metadata.
 
@@ -297,18 +487,15 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     - right: overwrite template rows top-down in DF order; insert if DF is longer;
              clear remaining template rows if DF is shorter.
     """
-    join_mode, on_col = _parse_table_meta(mc)
+    join_mode, on_col, _ = _parse_table_meta(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
     header_row = tag_row - 1
     join_tmpl_col = tag_col - 1
 
-    # Name of the DF join column: explicit on= override, else template header name
     tmpl_join_header = _get_merged_cell_value(ws, header_row, join_tmpl_col)
     join_df_col: str = on_col if on_col is not None else str(tmpl_join_header)
 
     headers = _read_headers(ws, header_row, tag_col)
-    data_col_indices = [col_idx for _, col_idx in headers]
-
     # Handle {{ insert_data }} marker — delete its row early so the boundary
     # scans below see a contiguous table.  The deleted row's position becomes
     # the insertion point for extra rows (outer join).
@@ -317,6 +504,9 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     if insert_data_marker is not None:
         id_row, _id_col = insert_data_marker
         ws.delete_rows(id_row)
+        # openpyxl shifts cell data but not the merge registry on delete_rows.
+        # Correct the registry so _copy_row_styles sees accurate positions.
+        _sync_merges_after_delete(ws, id_row)
         # After deletion, the row that was below now sits at id_row.
         # Extra rows should be inserted above that row.
         insert_data_before = id_row
@@ -355,7 +545,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             last_tmpl_row = end_row - 1
             delete_end_row = end_row
     else:
-        last_tmpl_row = _find_last_data_row(ws, tag_row, join_tmpl_col, data_col_indices)
+        last_tmpl_row = _find_last_data_row(ws, tag_row, join_tmpl_col)
 
     # {{ insert_data }} takes precedence over {{ end_table }} for the
     # insertion point.  The table boundary (last_tmpl_row) is unaffected —
@@ -364,9 +554,6 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         insert_before_row = insert_data_before
 
     n_tmpl = last_tmpl_row - tag_row + 1
-
-    # Track how many rows were inserted so we can adjust the delete_end_row
-    # position at the end.
     rows_inserted = 0
 
     # Clear the tag placeholder before any data writes so the data loop
@@ -390,7 +577,6 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             for _, col_idx in headers:
                 ws.cell(r, col_idx).value = None
     else:
-        # Build DF lookup: join_value → row dict
         df_lookup: dict[Any, dict[str, Any]] = {}
         for row in df.iter_rows(named=True):
             df_lookup[row[join_df_col]] = row
@@ -438,8 +624,6 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         # rows_inserted.
         if rows_inserted and insert_before_row is not None:
             shifted_join: dict[int, Any] = {}
-            # insert_before_row already accounts for the shift (updated above).
-            # Original rows were at: insert_before_row - rows_inserted .. last_tmpl_row - rows_inserted
             orig_insert_row = insert_before_row - rows_inserted
             for orig_r, val in saved_join.items():
                 if orig_r >= orig_insert_row:
@@ -461,9 +645,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             elif join_mode == "inner":
                 for _, col_idx in headers:
                     ws.cell(r, col_idx).value = None
-            # left: leave unmatched rows as-is
 
-        # Write extra rows (outer join only).
         if extra:
             if insert_before_row is not None:
                 # Option C: extras occupy the rows just above insert_before_row.
@@ -480,6 +662,8 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     # shifted if extra rows were inserted above, so adjust accordingly.
     if delete_end_row is not None:
         ws.delete_rows(delete_end_row + rows_inserted)
+        # Sync the merge registry for the same reason as the insert_data delete.
+        _sync_merges_after_delete(ws, delete_end_row + rows_inserted)
 
 
 class ExcelTemplateWriter:
@@ -573,6 +757,17 @@ class ExcelTemplateWriter:
                         _, col_n = coordinate_to_tuple(mc.cell_addr)
                         ws.cell(row_n + i, col_n).value = vars[mc.name].value[i]
 
+        # ── Collision detection ────────────────────────────────────────────────
+        # Check that no two table operations on the same sheet overlap.
+        regions_by_sheet: dict[str, list[tuple[str, tuple[int, int, int, int]]]] = {}
+        for mc in tables:
+            ws = wb[mc.sheet]
+            df = vars[mc.name].value
+            region = _compute_table_region(ws, mc, df)
+            regions_by_sheet.setdefault(mc.sheet, []).append((f"table({mc.name})", region))
+        for sheet_name, regions in regions_by_sheet.items():
+            _check_region_collisions(regions)
+
         # ── Table cells ────────────────────────────────────────────────────────
         # Process bottom-up per sheet so outer row insertions don't corrupt
         # later table positions in the same sheet.
@@ -585,7 +780,11 @@ class ExcelTemplateWriter:
             for mc in sorted(
                 mcs, key=lambda c: coordinate_to_tuple(c.cell_addr)[0], reverse=True
             ):
-                _fill_table(ws, mc, vars[mc.name].value)
+                _, _, positional = _parse_table_meta(mc)
+                if positional:
+                    _fill_positional(ws, mc, vars[mc.name].value)
+                else:
+                    _fill_table(ws, mc, vars[mc.name].value)
 
         # ── Scalar cells ───────────────────────────────────────────────────────
         for mc in scalars:
