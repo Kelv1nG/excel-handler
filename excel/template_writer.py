@@ -790,6 +790,16 @@ class ExcelTemplateWriter:
         for mc in scalars:
             ws = wb[mc.sheet]
             row_n, col_n = coordinate_to_tuple(mc.cell_addr)
-            ws.cell(row_n, col_n).value = vars[mc.name].value
+            if "." in mc.name:
+                var_name, col_name = mc.name.split(".", 1)
+                tv = vars[var_name]
+                if tv.value.height != 1:
+                    raise ValueError(
+                        f"Record variable '{var_name}' has {tv.value.height} rows;"
+                        " expected exactly 1"
+                    )
+                ws.cell(row_n, col_n).value = tv.value[col_name][0]
+            else:
+                ws.cell(row_n, col_n).value = vars[mc.name].value
 
         wb.save(file)

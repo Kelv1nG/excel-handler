@@ -5,7 +5,7 @@ from typing import Any, Protocol, Literal, Self
 
 import polars as pl
 
-kind = Literal["single", "list", "table"]
+kind = Literal["single", "list", "table", "record"]
 
 
 @dataclass
@@ -20,6 +20,18 @@ class TypedValue:
 
     value: Any
     kind: kind
+
+    def __getitem__(self, col: str) -> Any:
+        """Return the scalar value at *col* from a single-row record DataFrame.
+
+        Raises:
+            ValueError: If the DataFrame does not have exactly one row.
+        """
+        if self.value.height != 1:
+            raise ValueError(
+                f"Record variable has {self.value.height} rows; expected exactly 1"
+            )
+        return self.value[col][0]
 
 
 class TemplateReader[T](Protocol):
