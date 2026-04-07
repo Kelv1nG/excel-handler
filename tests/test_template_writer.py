@@ -1020,3 +1020,212 @@ class TestSortedOuterTmplRows:
         ws = wb.active
         assert ws["A8"].value == "Total"
         assert ws["B8"].value == 999
+
+
+# ---------------------------------------------------------------------------
+# fill= parameter tests
+#
+# Template layout (both fixtures):
+#   Row 1: Index, col1, col2  (headers)
+#   Row 2: a,  tag            (matched by df row "a")
+#   Row 3: x                  (template-only, not in df)
+#   Row 4: {{ end_table }}    (Option A — deleted after fill)
+#
+# DataFrame: Index=[a, b], col1=[1, None], col2=[None, 2]
+#
+# Expected output rows (outer join inserts extra row b):
+#   Row 2: a   col1=1       col2=<null or fill>
+#   Row 3: x   col1=<fill>  col2=<fill>
+#   Row 4: b   col1=<fill>  col2=2
+# ---------------------------------------------------------------------------
+
+def _fill_df():
+    return pl.DataFrame({
+        "Index": ["a", "b"],
+        "col1": [1, None],
+        "col2": [None, 2],
+    })
+
+
+def _run_fill(template_path, tmp_path):
+    output = str(tmp_path / "out_fill.xlsx")
+    writer = ExcelTemplateWriter(template_path)
+    writer.write({"data": TypedValue(_fill_df(), "table")}, output)
+    return load_workbook(output)
+
+
+class TestTableFillGlobal:
+    """fill=0 — every null in every data column is replaced with 0."""
+
+    def test_matched_row_null_col_filled(self, template_fill_global_path, tmp_path):
+        """Row a: col2 was None in df → gets 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["C2"].value == 0
+
+    def test_matched_row_non_null_unchanged(self, template_fill_global_path, tmp_path):
+        """Row a: col1=1 in df → stays 1."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 1
+
+    def test_template_only_row_all_cols_filled(self, template_fill_global_path, tmp_path):
+        """Row x: template-only (not in df) → col1 and col2 both get 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B3"].value == 0
+        assert ws["C3"].value == 0
+
+    def test_extra_outer_row_null_col_filled(self, template_fill_global_path, tmp_path):
+        """Row b: outer-extra row, col1 was None in df → gets 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B4"].value == 0
+
+    def test_extra_outer_row_non_null_unchanged(self, template_fill_global_path, tmp_path):
+        """Row b: col2=2 in df → stays 2."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["C4"].value == 2
+
+    def test_join_col_untouched(self, template_fill_global_path, tmp_path):
+        """The join column (Index) is never replaced by fill."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "a"
+        assert ws["A3"].value == "x"
+        assert ws["A4"].value == "b"
+
+
+class TestTableFillPerCol:
+    """fill=col1:0;col2:N/A — per-column fill values; unlisted cols stay null."""
+
+    def test_named_col1_null_filled_with_0(self, template_fill_per_col_path, tmp_path):
+        """Row a: col2 was None → gets 'N/A'; row b: col1 was None → gets 0."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["C2"].value == "N/A"  # a.col2: None → N/A
+        assert ws["B4"].value == 0       # b.col1: None → 0
+
+    def test_named_col2_null_filled_with_na(self, template_fill_per_col_path, tmp_path):
+        """Template-only row x: col2 gets 'N/A'."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["C3"].value == "N/A"
+
+    def test_named_col1_null_on_tmpl_row_filled(self, template_fill_per_col_path, tmp_path):
+        """Template-only row x: col1 gets 0."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["B3"].value == 0
+
+    def test_non_null_values_unchanged(self, template_fill_per_col_path, tmp_path):
+        """Existing non-null values are never overwritten by fill."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 1   # a.col1
+        assert ws["C4"].value == 2   # b.col2
+
+
+class TestTableFillLowerZone:
+    """fill=0 applies to ALL unmatched rows, including lower zone rows below {{ insert_data }}."""
+
+    def _run(self, template_fill_lower_zone_path, tmp_path):
+        df = pl.DataFrame({"Index": ["a", "b"], "col1": [1, None]})
+        output = str(tmp_path / "out_fill_lower.xlsx")
+        writer = ExcelTemplateWriter(template_fill_lower_zone_path)
+        writer.write({"data": TypedValue(df, "table")}, output)
+        return load_workbook(output)
+
+    def test_lower_zone_unmatched_row_is_filled(self, template_fill_lower_zone_path, tmp_path):
+        """'Total' row has no df match — col1 must be 0, not None."""
+        wb = self._run(template_fill_lower_zone_path, tmp_path)
+        ws = wb.active
+        # Row order: a(matched), b(outer extra inserted), Total(lower zone)
+        total_row = next(
+            r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value == "Total"
+        )
+        assert ws.cell(total_row, 2).value == 0
+
+    def test_upper_zone_matched_null_filled(self, template_fill_lower_zone_path, tmp_path):
+        """Row b: col1=None in df → gets 0."""
+        wb = self._run(template_fill_lower_zone_path, tmp_path)
+        ws = wb.active
+        b_row = next(r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value == "b")
+        assert ws.cell(b_row, 2).value == 0
+
+    def test_upper_zone_non_null_unchanged(self, template_fill_lower_zone_path, tmp_path):
+        """Row a: col1=1 in df → stays 1."""
+        wb = self._run(template_fill_lower_zone_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 1
+
+
+# ---------------------------------------------------------------------------
+# Sorted outer join + fill + unmatched lower zone row
+#
+# Template: Foo/Bar upper zone, {{ insert_data }}, No Sector / Total lower zone
+# DataFrame: Sector=[A,C,D,Total], ColValue=[1,2,3,5]
+#   - No Sector has no df match → ColValue must get fill=0
+#   - Total is matched → ColValue=5
+# ---------------------------------------------------------------------------
+
+class TestFillSortedOuterLowerZone:
+    """fill=0 must apply to unmatched lower zone rows in a sorted outer join."""
+
+    @staticmethod
+    def _df():
+        return pl.DataFrame({
+            "Sector": ["A", "C", "D", "Total"],
+            "ColValue": [1, 2, 3, 5],
+        })
+
+    def _run(self, template_path, tmp_path):
+        output = str(tmp_path / "out_fill_sorted_lower.xlsx")
+        writer = ExcelTemplateWriter(template_path)
+        writer.write({"data": TypedValue(self._df(), "table")}, output)
+        return load_workbook(output)
+
+    def _find_row(self, ws, key):
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(r, 1).value == key:
+                return r
+        raise AssertionError(f"{key!r} not found in output")
+
+    def test_unmatched_lower_zone_row_gets_fill(self, template_fill_sorted_outer_lower_zone_path, tmp_path):
+        """'No Sector' has no df match — ColValue must be 0, not None."""
+        wb = self._run(template_fill_sorted_outer_lower_zone_path, tmp_path)
+        ws = wb.active
+        r = self._find_row(ws, "No Sector")
+        assert ws.cell(r, 2).value == 0
+
+    def test_matched_lower_zone_row_gets_df_value(self, template_fill_sorted_outer_lower_zone_path, tmp_path):
+        """'Total' is matched in the df — ColValue must be 5."""
+        wb = self._run(template_fill_sorted_outer_lower_zone_path, tmp_path)
+        ws = wb.active
+        r = self._find_row(ws, "Total")
+        assert ws.cell(r, 2).value == 5
+
+    def test_upper_zone_sorted_with_tmpl_rows(self, template_fill_sorted_outer_lower_zone_path, tmp_path):
+        """Upper zone sorted asc: A, Bar(tmpl-only), C, D, Foo(tmpl-only)."""
+        wb = self._run(template_fill_sorted_outer_lower_zone_path, tmp_path)
+        ws = wb.active
+        upper = [ws.cell(r, 1).value for r in range(2, 7)]
+        assert upper == ["A", "Bar", "C", "D", "Foo"]
+
+    def test_tmpl_only_upper_zone_rows_get_fill(self, template_fill_sorted_outer_lower_zone_path, tmp_path):
+        """Bar and Foo are template-only rows — their ColValue must be 0 via fill."""
+        wb = self._run(template_fill_sorted_outer_lower_zone_path, tmp_path)
+        ws = wb.active
+        bar_row = self._find_row(ws, "Bar")
+        foo_row = self._find_row(ws, "Foo")
+        assert ws.cell(bar_row, 2).value == 0
+        assert ws.cell(foo_row, 2).value == 0
+
+    def test_matched_upper_zone_rows_get_df_values(self, template_fill_sorted_outer_lower_zone_path, tmp_path):
+        """A, C, D are matched — their ColValues must be 1, 2, 3."""
+        wb = self._run(template_fill_sorted_outer_lower_zone_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(self._find_row(ws, "A"), 2).value == 1
+        assert ws.cell(self._find_row(ws, "C"), 2).value == 2
+        assert ws.cell(self._find_row(ws, "D"), 2).value == 3

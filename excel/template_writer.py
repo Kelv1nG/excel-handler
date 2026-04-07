@@ -18,6 +18,71 @@ from excel._utils import load_excel_workbook
 _END_TABLE_RE = re.compile(r"\{\{\s*end_table\s*(?:\|\s*(?P<meta>[^}]*))?\}\}")
 _INSERT_DATA_RE = re.compile(r"\{\{\s*insert_data\s*\}\}")
 
+# Extracts the raw fill spec from the metadata string without relying on the
+# comma-split parser.  Matches "fill=..." stopping before the next key= or
+# closing paren, e.g. "fill=0" or "fill=colA:0;colB:N/A".
+_FILL_SPEC_RE = re.compile(r"\bfill=([^,)]+)")
+
+_FILL_MISSING = object()  # sentinel for _apply_fill
+
+
+def _coerce_fill(v: str) -> Any:
+    """Coerce a fill value string to its most specific Python type."""
+    if v.lower() == "true":
+        return True
+    if v.lower() == "false":
+        return False
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    return v
+
+
+def _parse_fill_spec(mc: MarkedCell) -> dict[str | None, Any] | None:
+    """Return a fill spec dict from a ``fill=`` metadata parameter, or *None*.
+
+    Two forms:
+
+    * ``fill=0``                 — global: ``{None: 0}``
+    * ``fill=colA:0;colB:N/A``  — per-column: ``{"colA": 0, "colB": "N/A"}``
+
+    Per-column pairs use ``:`` as the col:value separator and ``;`` to
+    separate pairs (commas are reserved by the outer metadata parser).
+    """
+    m = _FILL_SPEC_RE.search(mc.metadata)
+    if m is None:
+        return None
+    raw = m.group(1).strip()
+    if ":" not in raw:
+        return {None: _coerce_fill(raw)}
+    result: dict[str | None, Any] = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        col, _, val = part.partition(":")
+        result[col.strip()] = _coerce_fill(val.strip())
+    return result
+
+
+def _apply_fill(value: Any, col_name: str, fill_spec: dict[str | None, Any] | None) -> Any:
+    """Return *value*, or a fill substitute when *value* is *None* and fill is configured.
+
+    Lookup order: per-column value → global value → ``None`` (no fill).
+    """
+    if value is not None or fill_spec is None:
+        return value
+    v = fill_spec.get(col_name, _FILL_MISSING)
+    if v is not _FILL_MISSING:
+        return v
+    return fill_spec.get(None)  # global fallback; None if absent
+
+
 def _is_loop(cell: MarkedCell) -> bool:
     """Return ``True`` if *cell* carries a ``loop()`` metadata tag."""
     return cell.parse_metadata().get("type") == "loop"
@@ -125,7 +190,15 @@ def _sync_merges_after_delete(ws, deleted_row: int) -> None:
 
 
 def _copy_row_styles(ws, source_row: int, count: int) -> None:
-    """Insert *count* rows below *source_row*, copying values and styles from it."""
+    """Insert *count* rows below *source_row*, copying values and styles from it.
+    
+    Handles merged cells carefully: snapshots merges and styles before insert_rows(),
+    then reconstructs/splits merges that span the insertion point. openpyxl auto-extends
+    spanning merges, which is incorrect for data rows — this function prevents that by
+    splitting them into top and bottom portions with unmerged insertion space between.
+    
+    MergedCell proxies are purged from inserted rows to ensure all cells are writable.
+    """
     # Snapshot merged ranges before insert — openpyxl's insert_rows() auto-extends
     # any merged range that spans the insertion point, which would incorrectly
     # merge the newly inserted data rows.
@@ -134,10 +207,9 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
         for m in ws.merged_cells.ranges
     ]
 
-    # Snapshot source-row styles BEFORE insert_rows() — the insert can create
-    # phantom MergedCell proxies on source_row that the later ghost purge
-    # removes, leaving fresh Cell objects with no styles.  By saving a copy
-    # now we can restore source_row and copy to inserted rows reliably.
+    # Snapshot source-row styles BEFORE insert_rows() to protect against
+    # MergedCell proxy issues: openpyxl may create temporary proxies that later
+    # get purged, leaving cells without their original styles. Save now, restore after.
     max_col = ws.max_column
     saved_styles: dict[int, dict[str, Any]] = {}
     for col in range(1, max_col + 1):
@@ -152,10 +224,9 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
                 "alignment": copy(style_cell.alignment),
             }
 
-    # Snapshot styles AND values for merged cells BELOW source_row before
-    # insert_rows() shifts them.  We save values here (from the real Cell
-    # top-left) because after insert_rows() openpyxl may leave a MergedCell
-    # ghost at the shifted position, making .value read-only and returning None.
+    # Snapshot values from merged cells BELOW source_row before insert_rows().
+    # After shifting, the top-left Cell of a merge may be replaced by a MergedCell
+    # ghost with read-only .value; save the real top-left value now to restore later.
     merged_cell_styles: dict[tuple[int, int, int, int], dict[str, Any]] = {}
     merged_cell_values: dict[tuple[int, int, int, int], Any] = {}
     for m in ws.merged_cells.ranges:
@@ -200,10 +271,8 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
                         and existing_m.min_row in (min_r, min_r + count)
                         and existing_m.max_row in (max_r, max_r + count)):
                     _safe_remove_merge(ws, existing_m)
-            # After unmerging, openpyxl may leave a MergedCell ghost in
-            # ws._cells at the target position — the registry unmerge does
-            # not purge the cell object.  Remove it so ws.cell() creates a
-            # fresh writable Cell; otherwise .value = ... raises AttributeError.
+            # After registry unmerge, clean up any MergedCell ghosts in ws._cells
+            # so ws.cell() returns a fresh writable Cell instead of a proxy.
             ws._cells.pop((min_r + count, min_c), None)
             # Set value BEFORE re-merging (after merge, top-left becomes a
             # MergedCell with read-only .value)
@@ -228,8 +297,7 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
         if not (min_r <= source_row < max_r):
             continue
 
-        # Use pre-saved snapshot: insert_rows may have created MergedCell
-        # ghosts at min_r that make .value return None.
+        # Use pre-saved snapshot in case insert_rows() left MergedCell ghosts.
         key = (min_r, min_c, max_r, max_c)
         saved_value = merged_cell_values.get(key) or ws.cell(min_r, min_c).value
 
@@ -517,6 +585,7 @@ def _sorted_outer_fill(
     last_tmpl_row: int,
     insert_before_row: int | None,
     order_by: tuple[str | None, bool],
+    fill_spec: dict[str | None, Any] | None = None,
 ) -> int:
     """Write a sorted outer join into the upper zone of a table region.
 
@@ -590,7 +659,7 @@ def _sorted_outer_fill(
         ws_row = tag_row + i
         ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
         for col_name, col_idx in headers:
-            ws.cell(ws_row, col_idx).value = row.get(col_name)
+            ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
 
     # Clear leftover upper zone slots when fewer items than slots.
     for r in range(tag_row + n_upper_items, upper_last_row + 1):
@@ -611,7 +680,12 @@ def _sorted_outer_fill(
             if tmpl_val in df_lookup:
                 row = df_lookup[tmpl_val]
                 for col_name, col_idx in headers:
-                    ws.cell(new_r, col_idx).value = row.get(col_name)
+                    ws.cell(new_r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
+            elif fill_spec is not None:
+                # Unmatched lower zone row — apply fill to existing cell values.
+                for col_name, col_idx in headers:
+                    current = ws.cell(new_r, col_idx).value
+                    ws.cell(new_r, col_idx).value = _apply_fill(current, col_name, fill_spec)
 
     return rows_inserted
 
@@ -619,15 +693,32 @@ def _sorted_outer_fill(
 def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     """Fill ws with df data using join semantics described in mc.metadata.
 
-    Join modes:
+    Join modes and output strategy:
     - left:  fill matched rows; leave unmatched template rows blank. No inserts.
     - inner: fill matched rows; clear data cols on unmatched template rows. No inserts.
     - outer: fill matched rows; append unmatched DF rows at bottom (pushes content down).
+           With order_by: uses _sorted_outer_fill to sort upper zone by declared column.
     - right: overwrite template rows top-down in DF order; insert if DF is longer;
              clear remaining template rows if DF is shorter.
+    
+    Structural markers (optional):
+    - {{ end_table }}: on own row (no join value) → table ends at row above.
+    - {{ end_table }} (on data row): marker cell cleared; that row is last table row.
+    - {{ end_table | insert=above }} (on data row): extras inserted BEFORE this row.
+    - {{ insert_data }}: marks insertion point for outer join extras; takes precedence
+      over {{ end_table }} for insertion placement (boundary remains unchanged).
+    
+    Fill parameter (optional, metadata-based):
+    - fill=<value>: globally replace None with <value> in all data columns.
+    - fill=col1:<v1>;col2:<v2>: per-column fill values.
+    
+    Order by parameter (optional, outer join only):
+    - order_by=asc/desc: sort upper zone by join column ascending/descending.
+    - order_by=ColName[:asc|:desc]: sort by named column (default asc).
     """
     join_mode, on_col, _ = _parse_table_meta(mc)
     order_by = _parse_order_by(mc)
+    fill_spec = _parse_fill_spec(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
     header_row = tag_row - 1
     join_tmpl_col = tag_col - 1
@@ -710,7 +801,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             ws_row = tag_row + i
             ws.cell(ws_row, join_tmpl_col).value = row.get(join_df_col)
             for col_name, col_idx in headers:
-                ws.cell(ws_row, col_idx).value = row.get(col_name)
+                ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
         # Clear extra template rows if DF has fewer rows
         for r in range(tag_row + n_df, last_tmpl_row + 1):
             ws.cell(r, join_tmpl_col).value = None
@@ -734,7 +825,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         if join_mode == "outer" and order_by is not None:
             rows_inserted = _sorted_outer_fill(
                 ws, df, tag_row, join_tmpl_col, join_df_col,
-                headers, saved_join, last_tmpl_row, insert_before_row, order_by,
+                headers, saved_join, last_tmpl_row, insert_before_row, order_by, fill_spec,
             )
         else:
             # outer: insert extra rows BEFORE writing any data.  insert_rows()
@@ -789,10 +880,19 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                 if tmpl_val in df_lookup:
                     row = df_lookup[tmpl_val]
                     for col_name, col_idx in headers:
-                        ws.cell(r, col_idx).value = row.get(col_name)
+                        ws.cell(r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
                 elif join_mode == "inner":
                     for _, col_idx in headers:
                         ws.cell(r, col_idx).value = None
+
+            # Apply fill to unmatched template rows in left/outer joins.
+            if fill_spec is not None and join_mode in ("left", "outer"):
+                for r in sorted(saved_join):
+                    tmpl_val = saved_join[r]
+                    if tmpl_val not in df_lookup:
+                        for col_name, col_idx in headers:
+                            current = ws.cell(r, col_idx).value
+                            ws.cell(r, col_idx).value = _apply_fill(current, col_name, fill_spec)
 
             if extra:
                 if insert_before_row is not None:
@@ -804,7 +904,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     ws_row = extra_start + i
                     ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
                     for col_name, col_idx in headers:
-                        ws.cell(ws_row, col_idx).value = row.get(col_name)
+                        ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
 
     # Delete the {{ end_table }} marker row (Option A).  Row indices may have
     # shifted if extra rows were inserted above, so adjust accordingly.
@@ -819,11 +919,23 @@ class ExcelTemplateWriter:
 
     Template syntax:
 
-    * ``{{ variable }}`` — replaced with the scalar value of *variable*.
-    * ``{{ variable | loop }}`` — marks the cell as part of a loop row.
-      All loop-tagged cells in the same row must reference variables whose
-      values are lists of the same length.  The template row is expanded
-      into N rows (one per list element).
+    * ``{{ variable }}`` — scalar placeholder; replaced with a single value.
+    * ``{{ variable | loop() }}`` — loop row tag; marks cells for row expansion.
+      All loop-tagged cells in the same row must reference list variables of the
+      same length.  The template row is duplicated N times (one per list element).
+    * ``{{ variable | table(...) }}`` — table tag; fills a structured data region.
+      Parameters:
+      - join=[left|inner|outer|right]: join strategy (default: left).
+      - on=ColName: override join column (default: use header to left of tag).
+      - order_by=[asc|desc|ColName[:asc|:desc]]: sort outer join by column (outer only).
+      - fill=[value|col1:<v1>;col2:<v2>]: fill None values globally or per-column.
+      - positional=True: fill by position, no join column or header matching.
+    * ``{{ end_table }}`` — marks table boundary (optional); inserted row(s) after.
+    * ``{{ end_table | insert=above }}`` — marks table boundary; inserted row(s) before.
+    * ``{{ insert_data }}`` — marks insertion point for outer join extras (optional).
+
+    Record access (scalar only):
+    * ``{{ record_var.column_name }}`` — extract single cell from a 1-row DataFrame.
 
     Usage::
 
@@ -832,7 +944,7 @@ class ExcelTemplateWriter:
             {
                 "title": TypedValue("Q1 Report", "single"),
                 "month": TypedValue(["Jan", "Feb", "Mar"], "list"),
-                "amount": TypedValue([100, 200, 300], "list"),
+                "sales": TypedValue(sales_df, "table"),
             },
             "output.xlsx",
         )
