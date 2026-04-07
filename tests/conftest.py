@@ -118,3 +118,13 @@ def template_collision_path():
     Used to verify that ValueError is raised on collision detection.
     """
     return str(FIXTURES_DIR / "template_collision.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_record_path():
+    """Template with dot-notation tags for record (single-row DataFrame) access.
+
+    Sheet1 has {{ result.Company }}, {{ result.Revenue }}, {{ other.Quarter }},
+    and a plain scalar {{ title }} for mixed-mode testing.
+    """
+    return str(FIXTURES_DIR / "template_record.xlsx")

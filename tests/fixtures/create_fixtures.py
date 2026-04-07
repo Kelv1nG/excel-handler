@@ -473,6 +473,43 @@ def create_template_data_col_vertical_merge():
     print("  template_data_col_vertical_merge.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_record.xlsx
+# Template for testing record (dot-notation) variable access.
+#
+# Sheet1:
+#   Row 1: label/value header
+#   Row 2: "Company"  | {{ result.Company }}
+#   Row 3: "Revenue"  | {{ result.Revenue }}
+#   Row 4: "Quarter"  | {{ other.Quarter }}
+#   Row 5: "Title"    | {{ title }}          <- plain scalar for mixed test
+# ---------------------------------------------------------------------------
+def create_template_record():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Field"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "Company"
+    ws["B2"] = "{{ result.Company }}"
+
+    ws["A3"] = "Revenue"
+    ws["B3"] = "{{ result.Revenue }}"
+
+    ws["A4"] = "Quarter"
+    ws["B4"] = "{{ other.Quarter }}"
+
+    ws["A5"] = "Title"
+    ws["B5"] = "{{ title }}"
+
+    wb.save(FIXTURES_DIR / "template_record.xlsx")
+    wb.close()
+    print("  template_record.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -490,4 +527,5 @@ if __name__ == "__main__":
     create_template_vertical_merge()
     create_template_vertical_merge_adjacent()
     create_template_data_col_vertical_merge()
+    create_template_record()
     print("Done.")

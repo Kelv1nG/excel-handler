@@ -695,3 +695,114 @@ class TestCollisionDetection:
         writer = ExcelTemplateWriter(template_positional_fill_path)
         # Should NOT raise
         writer.write({"data": TypedValue(df, "table")}, str(tmp_path / "ok.xlsx"))
+
+
+# ---------------------------------------------------------------------------
+# Record (dot-notation) — {{ var_name.ColumnName }} for single-row DataFrames
+#
+# Template (template_record.xlsx, Sheet1):
+#   B2: {{ result.Company }}
+#   B3: {{ result.Revenue }}
+#   B4: {{ other.Quarter }}
+#   B5: {{ title }}            ← plain scalar
+# ---------------------------------------------------------------------------
+
+def _run_record_fill(template_path, tmp_path, result_df, other_df, title="Q1"):
+    output = str(tmp_path / "out_record.xlsx")
+    writer = ExcelTemplateWriter(template_path)
+    writer.write(
+        {
+            "result": TypedValue(result_df, "record"),
+            "other":  TypedValue(other_df,  "record"),
+            "title":  TypedValue(title,      "single"),
+        },
+        output,
+    )
+    return load_workbook(output)
+
+
+class TestRecordBasic:
+    """Single-row DataFrames are accessed by column name via dot-notation."""
+
+    def test_company_written(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["Acme"], "Revenue": [999]})
+        other  = pl.DataFrame({"Quarter": ["Q1"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other)
+        ws = wb.active
+        assert ws["B2"].value == "Acme"
+
+    def test_revenue_written(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["Acme"], "Revenue": [999]})
+        other  = pl.DataFrame({"Quarter": ["Q1"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other)
+        ws = wb.active
+        assert ws["B3"].value == 999
+
+    def test_other_namespace_written(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["Acme"], "Revenue": [999]})
+        other  = pl.DataFrame({"Quarter": ["Q2"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other)
+        ws = wb.active
+        assert ws["B4"].value == "Q2"
+
+    def test_namespaces_independent(self, template_record_path, tmp_path):
+        """Two record vars with the same column name resolve independently."""
+        result = pl.DataFrame({"Company": ["Alpha"], "Revenue": [1]})
+        other  = pl.DataFrame({"Quarter": ["Q3"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other)
+        ws = wb.active
+        assert ws["B2"].value == "Alpha"
+        assert ws["B4"].value == "Q3"
+
+
+class TestRecordMixedWithScalar:
+    """Record vars and plain scalars coexist in the same template."""
+
+    def test_plain_scalar_still_written(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["Beta"], "Revenue": [42]})
+        other  = pl.DataFrame({"Quarter": ["Q4"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other, title="Annual")
+        ws = wb.active
+        assert ws["B5"].value == "Annual"
+
+    def test_all_cells_correct(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["Gamma"], "Revenue": [7]})
+        other  = pl.DataFrame({"Quarter": ["Q1"]})
+        wb = _run_record_fill(template_record_path, tmp_path, result, other, title="Summary")
+        ws = wb.active
+        assert ws["B2"].value == "Gamma"
+        assert ws["B3"].value == 7
+        assert ws["B4"].value == "Q1"
+        assert ws["B5"].value == "Summary"
+
+
+class TestRecordMultiRowRaises:
+    """Passing a DataFrame with more than one row raises ValueError."""
+
+    def test_raises_on_two_rows(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["A", "B"], "Revenue": [1, 2]})
+        other  = pl.DataFrame({"Quarter": ["Q1"]})
+        writer = ExcelTemplateWriter(template_record_path)
+        with pytest.raises(ValueError, match="result"):
+            writer.write(
+                {
+                    "result": TypedValue(result, "record"),
+                    "other":  TypedValue(other,  "record"),
+                    "title":  TypedValue("T",    "single"),
+                },
+                str(tmp_path / "err.xlsx"),
+            )
+
+    def test_error_message_contains_row_count(self, template_record_path, tmp_path):
+        result = pl.DataFrame({"Company": ["A", "B", "C"], "Revenue": [1, 2, 3]})
+        other  = pl.DataFrame({"Quarter": ["Q1"]})
+        writer = ExcelTemplateWriter(template_record_path)
+        with pytest.raises(ValueError, match="3"):
+            writer.write(
+                {
+                    "result": TypedValue(result, "record"),
+                    "other":  TypedValue(other,  "record"),
+                    "title":  TypedValue("T",    "single"),
+                },
+                str(tmp_path / "err.xlsx"),
+            )
