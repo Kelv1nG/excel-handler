@@ -521,16 +521,17 @@ def _sorted_outer_fill(
     """Write a sorted outer join into the upper zone of a table region.
 
     All rows from *tag_row* up to (but not including) *insert_before_row* are
-    written top-down in the order given by *order_by*.  Rows at or below
-    *insert_before_row* (the lower zone) keep their template positions and are
-    filled by key-match.
+    written top-down in the order given by *order_by*.  Template rows in the
+    upper zone whose join key is absent from the DataFrame are preserved in the
+    sorted output with null data-column values (template-only rows).  Rows at
+    or below *insert_before_row* (the lower zone) keep their template positions
+    and are filled by key-match.
 
     Returns the number of rows inserted into the worksheet.
     """
     sort_col, sort_asc = order_by
     if sort_col is None:
         sort_col = join_df_col
-    df_sorted = df.sort(sort_col, descending=not sort_asc, nulls_last=True)
 
     # Lower zone: join values of all rows at/below insert_before_row.
     # These are key-matched separately and excluded from the sorted upper zone.
@@ -539,22 +540,43 @@ def _sorted_outer_fill(
         for r in range(insert_before_row, last_tmpl_row + 1):
             lower_vals.add(saved_join.get(r))
 
-    # Upper zone: all sorted df rows NOT reserved for the lower zone.
-    upper_df = [
-        row
-        for row in df_sorted.iter_rows(named=True)
-        if row[join_df_col] not in lower_vals
-    ]
+    # Upper zone boundary before any insertion.
     upper_last_row = (
         insert_before_row - 1 if insert_before_row is not None else last_tmpl_row
     )
+
+    # All data rows for the upper zone (not reserved for the lower zone).
+    upper_items: list[dict[str, Any]] = [
+        row
+        for row in df.iter_rows(named=True)
+        if row[join_df_col] not in lower_vals
+    ]
+
+    # Template-only upper zone rows: join key present in the template but absent
+    # from the DataFrame.  Preserved in the sort output with null data columns.
+    df_join_vals: set[Any] = set(df[join_df_col].to_list())
+    for r in range(tag_row, upper_last_row + 1):
+        v = saved_join.get(r)
+        if v is not None and v not in df_join_vals and v not in lower_vals:
+            tmpl_row: dict[str, Any] = {join_df_col: v}
+            for col_name, _ in headers:
+                tmpl_row[col_name] = None
+            upper_items.append(tmpl_row)
+
+    # Sort combined upper zone: non-null sort-key values first (asc or desc),
+    # null sort-key values always last.
+    non_null = [r for r in upper_items if r.get(sort_col) is not None]
+    null_rows = [r for r in upper_items if r.get(sort_col) is None]
+    non_null.sort(key=lambda r: r[sort_col], reverse=not sort_asc)
+    upper_items = non_null + null_rows
+
     n_upper_tmpl = upper_last_row - tag_row + 1
-    n_upper_df = len(upper_df)
+    n_upper_items = len(upper_items)
     rows_inserted = 0
 
-    # Insert rows if the sorted df has more rows than available upper zone slots.
-    if n_upper_df > n_upper_tmpl:
-        rows_inserted = n_upper_df - n_upper_tmpl
+    # Insert rows if the sorted upper zone has more items than available slots.
+    if n_upper_items > n_upper_tmpl:
+        rows_inserted = n_upper_items - n_upper_tmpl
         _copy_row_styles(ws, upper_last_row, rows_inserted)
         upper_last_row += rows_inserted
         if insert_before_row is not None:
@@ -564,14 +586,14 @@ def _sorted_outer_fill(
             last_tmpl_row += rows_inserted
 
     # Write the sorted upper zone rows top-down.
-    for i, row in enumerate(upper_df):
+    for i, row in enumerate(upper_items):
         ws_row = tag_row + i
         ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
         for col_name, col_idx in headers:
             ws.cell(ws_row, col_idx).value = row.get(col_name)
 
-    # Clear leftover upper zone slots when the df has fewer rows than slots.
-    for r in range(tag_row + n_upper_df, upper_last_row + 1):
+    # Clear leftover upper zone slots when fewer items than slots.
+    for r in range(tag_row + n_upper_items, upper_last_row + 1):
         ws.cell(r, join_tmpl_col).value = None
         for _, col_idx in headers:
             ws.cell(r, col_idx).value = None

@@ -652,6 +652,41 @@ def create_template_sorted_outer_shorter():
     print("  template_sorted_outer_shorter.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_sorted_outer_tmpl_rows.xlsx
+# Sorted outer join where the upper zone has template-only rows (foo, bar)
+# that are NOT present in the DataFrame — they must survive the sort.
+# Row 1: Index, Value  (headers)
+# Row 2: foo, {{ data | table(join=outer, on=Index, order_by=asc) }}
+# Row 3: bar
+# Row 4: (B4={{ insert_data }})         ← insertion point marker
+# Row 5: No Sector                       ← lower zone (fixed)
+# Row 6: Total, {{ end_table }}          ← lower zone fixed row + Option B end_table
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_tmpl_rows():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "foo"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=asc) }}"
+    ws["A3"] = "bar"
+
+    ws["B4"] = "{{ insert_data }}"
+
+    ws["A5"] = "No Sector"
+    ws["A6"] = "Total"
+    ws["B6"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_tmpl_rows.xlsx")
+    wb.close()
+    print("  template_sorted_outer_tmpl_rows.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -675,4 +710,5 @@ if __name__ == "__main__":
     create_template_sorted_outer_fixed()
     create_template_sorted_outer_by_col()
     create_template_sorted_outer_shorter()
+    create_template_sorted_outer_tmpl_rows()
     print("Done.")

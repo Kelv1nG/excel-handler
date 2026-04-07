@@ -156,5 +156,11 @@ def template_sorted_outer_by_col_path():
 
 @pytest.fixture(scope="session")
 def template_sorted_outer_shorter_path():
-    """Template with 3 upper zone template rows but df provides only 2 rows — tests slot clearing."""
+    """Template with 3 upper zone template rows but df provides only 2 rows — template-only rows preserved."""
     return str(FIXTURES_DIR / "template_sorted_outer_shorter.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_tmpl_rows_path():
+    """Template with upper zone rows (foo, bar) absent from the df — must appear in sorted output."""
+    return str(FIXTURES_DIR / "template_sorted_outer_tmpl_rows.xlsx")
