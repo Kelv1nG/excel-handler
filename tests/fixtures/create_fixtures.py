@@ -510,6 +510,183 @@ def create_template_record():
     print("  template_record.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_sorted_outer_asc.xlsx
+# Sorted outer join — ascending, no fixed zone, Option A end_table.
+# Row 1: Index, Value  (headers)
+# Row 2: c,  {{ data | table(join=outer, on=Index, order_by=asc) }}
+# Row 3: a,  (empty)
+# Row 4: (empty), {{ end_table }}   ← Option A: own row, no join value
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_asc():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "c"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=asc) }}"
+    ws["A3"] = "a"
+
+    ws["B4"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_asc.xlsx")
+    wb.close()
+    print("  template_sorted_outer_asc.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_sorted_outer_desc.xlsx
+# Same layout as asc but tag uses order_by=desc.
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_desc():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "c"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=desc) }}"
+    ws["A3"] = "a"
+
+    ws["B4"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_desc.xlsx")
+    wb.close()
+    print("  template_sorted_outer_desc.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_sorted_outer_fixed.xlsx
+# Sorted outer join with a fixed lower zone via {{ insert_data }}.
+# Row 1: Index, Value  (headers)
+# Row 2: c,  {{ data | table(join=outer, on=Index, order_by=asc) }}
+# Row 3: a,  (empty)
+# Row 4: (empty), {{ insert_data }}   ← insertion point marker
+# Row 5: total, {{ end_table }}       ← Option B: on data row
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_fixed():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "c"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=asc) }}"
+    ws["A3"] = "a"
+
+    ws["B4"] = "{{ insert_data }}"
+
+    ws["A5"] = "total"
+    ws["B5"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_fixed.xlsx")
+    wb.close()
+    print("  template_sorted_outer_fixed.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_sorted_outer_by_col.xlsx
+# Sorted outer join — sort by a non-join column (Value:desc).
+# Row 1: Index, Value  (headers)
+# Row 2: c,  {{ data | table(join=outer, on=Index, order_by=Value:desc) }}
+# Row 3: a,  (empty)
+# Row 4: (empty), {{ end_table }}
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_by_col():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "c"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=Value:desc) }}"
+    ws["A3"] = "a"
+
+    ws["B4"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_by_col.xlsx")
+    wb.close()
+    print("  template_sorted_outer_by_col.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_sorted_outer_shorter.xlsx
+# Sorted outer join where df has fewer rows than upper zone template slots.
+# Row 1: Index, Value  (headers)
+# Row 2: c,  {{ data | table(join=outer, on=Index, order_by=asc) }}
+# Row 3: a,  (empty)
+# Row 4: b,  (empty)
+# Row 5: (empty), {{ end_table }}   ← 3 upper slots, but df only provides 2 rows
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_shorter():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "c"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=asc) }}"
+    ws["A3"] = "a"
+    ws["A4"] = "b"
+
+    ws["B5"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_shorter.xlsx")
+    wb.close()
+    print("  template_sorted_outer_shorter.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_sorted_outer_tmpl_rows.xlsx
+# Sorted outer join where the upper zone has template-only rows (foo, bar)
+# that are NOT present in the DataFrame — they must survive the sort.
+# Row 1: Index, Value  (headers)
+# Row 2: foo, {{ data | table(join=outer, on=Index, order_by=asc) }}
+# Row 3: bar
+# Row 4: (B4={{ insert_data }})         ← insertion point marker
+# Row 5: No Sector                       ← lower zone (fixed)
+# Row 6: Total, {{ end_table }}          ← lower zone fixed row + Option B end_table
+# ---------------------------------------------------------------------------
+def create_template_sorted_outer_tmpl_rows():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "foo"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, order_by=asc) }}"
+    ws["A3"] = "bar"
+
+    ws["B4"] = "{{ insert_data }}"
+
+    ws["A5"] = "No Sector"
+    ws["A6"] = "Total"
+    ws["B6"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_sorted_outer_tmpl_rows.xlsx")
+    wb.close()
+    print("  template_sorted_outer_tmpl_rows.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -528,4 +705,10 @@ if __name__ == "__main__":
     create_template_vertical_merge_adjacent()
     create_template_data_col_vertical_merge()
     create_template_record()
+    create_template_sorted_outer_asc()
+    create_template_sorted_outer_desc()
+    create_template_sorted_outer_fixed()
+    create_template_sorted_outer_by_col()
+    create_template_sorted_outer_shorter()
+    create_template_sorted_outer_tmpl_rows()
     print("Done.")
