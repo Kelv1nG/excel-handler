@@ -128,3 +128,33 @@ def template_record_path():
     and a plain scalar {{ title }} for mixed-mode testing.
     """
     return str(FIXTURES_DIR / "template_record.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_asc_path():
+    """Template with table(join=outer, order_by=asc) — 2 upper template rows, Option A end_table."""
+    return str(FIXTURES_DIR / "template_sorted_outer_asc.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_desc_path():
+    """Template with table(join=outer, order_by=desc) — 2 upper template rows, Option A end_table."""
+    return str(FIXTURES_DIR / "template_sorted_outer_desc.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_fixed_path():
+    """Template with table(join=outer, order_by=asc) and a fixed lower zone via {{ insert_data }}."""
+    return str(FIXTURES_DIR / "template_sorted_outer_fixed.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_by_col_path():
+    """Template with table(join=outer, order_by=Value:desc) — sort by non-join column."""
+    return str(FIXTURES_DIR / "template_sorted_outer_by_col.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_sorted_outer_shorter_path():
+    """Template with 3 upper zone template rows but df provides only 2 rows — tests slot clearing."""
+    return str(FIXTURES_DIR / "template_sorted_outer_shorter.xlsx")

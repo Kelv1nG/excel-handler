@@ -806,3 +806,147 @@ class TestRecordMultiRowRaises:
                 },
                 str(tmp_path / "err.xlsx"),
             )
+
+
+# ---------------------------------------------------------------------------
+# Sorted outer join — all rows (matched + inserted) sorted in the upper zone
+#
+# Fixtures share the same df helper: Index=[c,a,b,d], Value=[30,10,20,40].
+# Templates have 2 upper zone rows (c, a); outer join adds b and d.
+# ---------------------------------------------------------------------------
+
+def _run_sorted_outer(template_path, tmp_path, df=None):
+    """Fill a sorted-outer template with *df* (default: 4-row Index/Value DataFrame)."""
+    if df is None:
+        df = pl.DataFrame({
+            "Index": ["c", "a", "b", "d"],
+            "Value": [30, 10, 20, 40],
+        })
+    output = str(tmp_path / "out_sorted.xlsx")
+    writer = ExcelTemplateWriter(template_path)
+    writer.write({"data": TypedValue(df, "table")}, output)
+    return load_workbook(output)
+
+
+class TestSortedOuterAsc:
+    """order_by=asc — all 4 df rows sorted ascending by join column (Index)."""
+
+    def test_row_order_ascending(self, template_sorted_outer_asc_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_asc_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "a"
+        assert ws["A3"].value == "b"
+        assert ws["A4"].value == "c"
+        assert ws["A5"].value == "d"
+
+    def test_values_match_sorted_rows(self, template_sorted_outer_asc_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_asc_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 10  # a
+        assert ws["B3"].value == 20  # b
+        assert ws["B4"].value == 30  # c
+        assert ws["B5"].value == 40  # d
+
+    def test_end_table_row_deleted(self, template_sorted_outer_asc_path, tmp_path):
+        """The {{ end_table }} marker row (Option A) must be deleted."""
+        wb = _run_sorted_outer(template_sorted_outer_asc_path, tmp_path)
+        ws = wb.active
+        # Row 6 and beyond should be empty (end_table row deleted, nothing follows)
+        assert ws["A6"].value is None
+        assert ws["B6"].value is None
+
+
+class TestSortedOuterDesc:
+    """order_by=desc — all 4 df rows sorted descending by join column (Index)."""
+
+    def test_row_order_descending(self, template_sorted_outer_desc_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_desc_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "d"
+        assert ws["A3"].value == "c"
+        assert ws["A4"].value == "b"
+        assert ws["A5"].value == "a"
+
+    def test_values_match_sorted_rows(self, template_sorted_outer_desc_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_desc_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 40  # d
+        assert ws["B3"].value == 30  # c
+        assert ws["B4"].value == 20  # b
+        assert ws["B5"].value == 10  # a
+
+
+class TestSortedOuterFixed:
+    """order_by=asc with {{ insert_data }} marker — upper zone sorted, lower zone fixed."""
+
+    def test_upper_zone_sorted_ascending(self, template_sorted_outer_fixed_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_fixed_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "a"
+        assert ws["A3"].value == "b"
+        assert ws["A4"].value == "c"
+        assert ws["A5"].value == "d"
+
+    def test_upper_zone_values_correct(self, template_sorted_outer_fixed_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_fixed_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 10
+        assert ws["B3"].value == 20
+        assert ws["B4"].value == 30
+        assert ws["B5"].value == 40
+
+    def test_lower_zone_fixed_key_preserved(self, template_sorted_outer_fixed_path, tmp_path):
+        """Row 'total' is in the lower zone; its join column value must be retained."""
+        wb = _run_sorted_outer(template_sorted_outer_fixed_path, tmp_path)
+        ws = wb.active
+        assert ws["A6"].value == "total"
+
+    def test_lower_zone_value_empty_for_unmatched_key(self, template_sorted_outer_fixed_path, tmp_path):
+        """'total' is not in the df so its Value column stays as-is (None from template)."""
+        wb = _run_sorted_outer(template_sorted_outer_fixed_path, tmp_path)
+        ws = wb.active
+        assert ws["B6"].value is None
+
+
+class TestSortedOuterByCol:
+    """order_by=Value:desc — sorted by the Value column, not the join column."""
+
+    def test_row_order_by_value_descending(self, template_sorted_outer_by_col_path, tmp_path):
+        # df: Index=[c,a,b,d], Value=[30,10,20,40] → sorted by Value desc: d,c,b,a
+        wb = _run_sorted_outer(template_sorted_outer_by_col_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "d"  # Value=40
+        assert ws["A3"].value == "c"  # Value=30
+        assert ws["A4"].value == "b"  # Value=20
+        assert ws["A5"].value == "a"  # Value=10
+
+    def test_values_correct_after_col_sort(self, template_sorted_outer_by_col_path, tmp_path):
+        wb = _run_sorted_outer(template_sorted_outer_by_col_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 40
+        assert ws["B3"].value == 30
+        assert ws["B4"].value == 20
+        assert ws["B5"].value == 10
+
+
+class TestSortedOuterShorter:
+    """df has 2 rows (a, d) but template has 3 upper zone slots (c, a, b).
+    Remaining slots must be cleared after writing the sorted rows.
+    """
+
+    def test_rows_written_sorted(self, template_sorted_outer_shorter_path, tmp_path):
+        df = pl.DataFrame({"Index": ["a", "d"], "Value": [10, 40]})
+        wb = _run_sorted_outer(template_sorted_outer_shorter_path, tmp_path, df)
+        ws = wb.active
+        assert ws["A2"].value == "a"
+        assert ws["B2"].value == 10
+        assert ws["A3"].value == "d"
+        assert ws["B3"].value == 40
+
+    def test_leftover_slot_cleared(self, template_sorted_outer_shorter_path, tmp_path):
+        """Row 4 was template slot 'b', unreachable from 2-row df — must be cleared."""
+        df = pl.DataFrame({"Index": ["a", "d"], "Value": [10, 40]})
+        wb = _run_sorted_outer(template_sorted_outer_shorter_path, tmp_path, df)
+        ws = wb.active
+        assert ws["A4"].value is None
+        assert ws["B4"].value is None
