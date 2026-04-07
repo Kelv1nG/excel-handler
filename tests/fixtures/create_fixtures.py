@@ -687,6 +687,61 @@ def create_template_sorted_outer_tmpl_rows():
     print("  template_sorted_outer_tmpl_rows.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_fill_global.xlsx
+# Outer join with fill=0 — every null data column in the output gets 0.
+# Row 1: Index, col1, col2  (headers)
+# Row 2: a,  {{ data | table(join=outer, on=Index, fill=0) }}
+# Row 3: x  (template-only, not in df)
+# Row 4: (empty), {{ end_table }}   ← Option A
+# ---------------------------------------------------------------------------
+def create_template_fill_global():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, fill=0) }}"
+    ws["A3"] = "x"
+
+    ws["B4"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_fill_global.xlsx")
+    wb.close()
+    print("  template_fill_global.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_fill_per_col.xlsx
+# Outer join with fill=col1:0;col2:N/A — per-column fill values.
+# Same layout as template_fill_global.xlsx.
+# ---------------------------------------------------------------------------
+def create_template_fill_per_col():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    ws["C1"] = "col2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, fill=col1:0;col2:N/A) }}"
+    ws["A3"] = "x"
+
+    ws["B4"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_fill_per_col.xlsx")
+    wb.close()
+    print("  template_fill_per_col.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -711,4 +766,6 @@ if __name__ == "__main__":
     create_template_sorted_outer_by_col()
     create_template_sorted_outer_shorter()
     create_template_sorted_outer_tmpl_rows()
+    create_template_fill_global()
+    create_template_fill_per_col()
     print("Done.")

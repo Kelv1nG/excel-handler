@@ -1020,3 +1020,108 @@ class TestSortedOuterTmplRows:
         ws = wb.active
         assert ws["A8"].value == "Total"
         assert ws["B8"].value == 999
+
+
+# ---------------------------------------------------------------------------
+# fill= parameter tests
+#
+# Template layout (both fixtures):
+#   Row 1: Index, col1, col2  (headers)
+#   Row 2: a,  tag            (matched by df row "a")
+#   Row 3: x                  (template-only, not in df)
+#   Row 4: {{ end_table }}    (Option A — deleted after fill)
+#
+# DataFrame: Index=[a, b], col1=[1, None], col2=[None, 2]
+#
+# Expected output rows (outer join inserts extra row b):
+#   Row 2: a   col1=1       col2=<null or fill>
+#   Row 3: x   col1=<fill>  col2=<fill>
+#   Row 4: b   col1=<fill>  col2=2
+# ---------------------------------------------------------------------------
+
+def _fill_df():
+    return pl.DataFrame({
+        "Index": ["a", "b"],
+        "col1": [1, None],
+        "col2": [None, 2],
+    })
+
+
+def _run_fill(template_path, tmp_path):
+    output = str(tmp_path / "out_fill.xlsx")
+    writer = ExcelTemplateWriter(template_path)
+    writer.write({"data": TypedValue(_fill_df(), "table")}, output)
+    return load_workbook(output)
+
+
+class TestTableFillGlobal:
+    """fill=0 — every null in every data column is replaced with 0."""
+
+    def test_matched_row_null_col_filled(self, template_fill_global_path, tmp_path):
+        """Row a: col2 was None in df → gets 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["C2"].value == 0
+
+    def test_matched_row_non_null_unchanged(self, template_fill_global_path, tmp_path):
+        """Row a: col1=1 in df → stays 1."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 1
+
+    def test_template_only_row_all_cols_filled(self, template_fill_global_path, tmp_path):
+        """Row x: template-only (not in df) → col1 and col2 both get 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B3"].value == 0
+        assert ws["C3"].value == 0
+
+    def test_extra_outer_row_null_col_filled(self, template_fill_global_path, tmp_path):
+        """Row b: outer-extra row, col1 was None in df → gets 0."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["B4"].value == 0
+
+    def test_extra_outer_row_non_null_unchanged(self, template_fill_global_path, tmp_path):
+        """Row b: col2=2 in df → stays 2."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["C4"].value == 2
+
+    def test_join_col_untouched(self, template_fill_global_path, tmp_path):
+        """The join column (Index) is never replaced by fill."""
+        wb = _run_fill(template_fill_global_path, tmp_path)
+        ws = wb.active
+        assert ws["A2"].value == "a"
+        assert ws["A3"].value == "x"
+        assert ws["A4"].value == "b"
+
+
+class TestTableFillPerCol:
+    """fill=col1:0;col2:N/A — per-column fill values; unlisted cols stay null."""
+
+    def test_named_col1_null_filled_with_0(self, template_fill_per_col_path, tmp_path):
+        """Row a: col2 was None → gets 'N/A'; row b: col1 was None → gets 0."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["C2"].value == "N/A"  # a.col2: None → N/A
+        assert ws["B4"].value == 0       # b.col1: None → 0
+
+    def test_named_col2_null_filled_with_na(self, template_fill_per_col_path, tmp_path):
+        """Template-only row x: col2 gets 'N/A'."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["C3"].value == "N/A"
+
+    def test_named_col1_null_on_tmpl_row_filled(self, template_fill_per_col_path, tmp_path):
+        """Template-only row x: col1 gets 0."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["B3"].value == 0
+
+    def test_non_null_values_unchanged(self, template_fill_per_col_path, tmp_path):
+        """Existing non-null values are never overwritten by fill."""
+        wb = _run_fill(template_fill_per_col_path, tmp_path)
+        ws = wb.active
+        assert ws["B2"].value == 1   # a.col1
+        assert ws["C4"].value == 2   # b.col2

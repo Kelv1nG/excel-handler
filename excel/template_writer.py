@@ -18,6 +18,71 @@ from excel._utils import load_excel_workbook
 _END_TABLE_RE = re.compile(r"\{\{\s*end_table\s*(?:\|\s*(?P<meta>[^}]*))?\}\}")
 _INSERT_DATA_RE = re.compile(r"\{\{\s*insert_data\s*\}\}")
 
+# Extracts the raw fill spec from the metadata string without relying on the
+# comma-split parser.  Matches "fill=..." stopping before the next key= or
+# closing paren, e.g. "fill=0" or "fill=colA:0;colB:N/A".
+_FILL_SPEC_RE = re.compile(r"\bfill=([^,)]+)")
+
+_FILL_MISSING = object()  # sentinel for _apply_fill
+
+
+def _coerce_fill(v: str) -> Any:
+    """Coerce a fill value string to its most specific Python type."""
+    if v.lower() == "true":
+        return True
+    if v.lower() == "false":
+        return False
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    return v
+
+
+def _parse_fill_spec(mc: MarkedCell) -> dict[str | None, Any] | None:
+    """Return a fill spec dict from a ``fill=`` metadata parameter, or *None*.
+
+    Two forms:
+
+    * ``fill=0``                 — global: ``{None: 0}``
+    * ``fill=colA:0;colB:N/A``  — per-column: ``{"colA": 0, "colB": "N/A"}``
+
+    Per-column pairs use ``:`` as the col:value separator and ``;`` to
+    separate pairs (commas are reserved by the outer metadata parser).
+    """
+    m = _FILL_SPEC_RE.search(mc.metadata)
+    if m is None:
+        return None
+    raw = m.group(1).strip()
+    if ":" not in raw:
+        return {None: _coerce_fill(raw)}
+    result: dict[str | None, Any] = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        col, _, val = part.partition(":")
+        result[col.strip()] = _coerce_fill(val.strip())
+    return result
+
+
+def _apply_fill(value: Any, col_name: str, fill_spec: dict[str | None, Any] | None) -> Any:
+    """Return *value*, or a fill substitute when *value* is *None* and fill is configured.
+
+    Lookup order: per-column value → global value → ``None`` (no fill).
+    """
+    if value is not None or fill_spec is None:
+        return value
+    v = fill_spec.get(col_name, _FILL_MISSING)
+    if v is not _FILL_MISSING:
+        return v
+    return fill_spec.get(None)  # global fallback; None if absent
+
+
 def _is_loop(cell: MarkedCell) -> bool:
     """Return ``True`` if *cell* carries a ``loop()`` metadata tag."""
     return cell.parse_metadata().get("type") == "loop"
@@ -517,6 +582,7 @@ def _sorted_outer_fill(
     last_tmpl_row: int,
     insert_before_row: int | None,
     order_by: tuple[str | None, bool],
+    fill_spec: dict[str | None, Any] | None = None,
 ) -> int:
     """Write a sorted outer join into the upper zone of a table region.
 
@@ -590,7 +656,7 @@ def _sorted_outer_fill(
         ws_row = tag_row + i
         ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
         for col_name, col_idx in headers:
-            ws.cell(ws_row, col_idx).value = row.get(col_name)
+            ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
 
     # Clear leftover upper zone slots when fewer items than slots.
     for r in range(tag_row + n_upper_items, upper_last_row + 1):
@@ -611,7 +677,7 @@ def _sorted_outer_fill(
             if tmpl_val in df_lookup:
                 row = df_lookup[tmpl_val]
                 for col_name, col_idx in headers:
-                    ws.cell(new_r, col_idx).value = row.get(col_name)
+                    ws.cell(new_r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
 
     return rows_inserted
 
@@ -628,6 +694,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     """
     join_mode, on_col, _ = _parse_table_meta(mc)
     order_by = _parse_order_by(mc)
+    fill_spec = _parse_fill_spec(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
     header_row = tag_row - 1
     join_tmpl_col = tag_col - 1
@@ -710,7 +777,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             ws_row = tag_row + i
             ws.cell(ws_row, join_tmpl_col).value = row.get(join_df_col)
             for col_name, col_idx in headers:
-                ws.cell(ws_row, col_idx).value = row.get(col_name)
+                ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
         # Clear extra template rows if DF has fewer rows
         for r in range(tag_row + n_df, last_tmpl_row + 1):
             ws.cell(r, join_tmpl_col).value = None
@@ -734,7 +801,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         if join_mode == "outer" and order_by is not None:
             rows_inserted = _sorted_outer_fill(
                 ws, df, tag_row, join_tmpl_col, join_df_col,
-                headers, saved_join, last_tmpl_row, insert_before_row, order_by,
+                headers, saved_join, last_tmpl_row, insert_before_row, order_by, fill_spec,
             )
         else:
             # outer: insert extra rows BEFORE writing any data.  insert_rows()
@@ -789,10 +856,19 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                 if tmpl_val in df_lookup:
                     row = df_lookup[tmpl_val]
                     for col_name, col_idx in headers:
-                        ws.cell(r, col_idx).value = row.get(col_name)
+                        ws.cell(r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
                 elif join_mode == "inner":
                     for _, col_idx in headers:
                         ws.cell(r, col_idx).value = None
+
+            # Apply fill to unmatched template rows in left/outer joins.
+            if fill_spec is not None and join_mode in ("left", "outer"):
+                for r in sorted(saved_join):
+                    tmpl_val = saved_join[r]
+                    if tmpl_val not in df_lookup:
+                        for col_name, col_idx in headers:
+                            current = ws.cell(r, col_idx).value
+                            ws.cell(r, col_idx).value = _apply_fill(current, col_name, fill_spec)
 
             if extra:
                 if insert_before_row is not None:
@@ -804,7 +880,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     ws_row = extra_start + i
                     ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
                     for col_name, col_idx in headers:
-                        ws.cell(ws_row, col_idx).value = row.get(col_name)
+                        ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
 
     # Delete the {{ end_table }} marker row (Option A).  Row indices may have
     # shifted if extra rows were inserted above, so adjust accordingly.
