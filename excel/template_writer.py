@@ -678,6 +678,11 @@ def _sorted_outer_fill(
                 row = df_lookup[tmpl_val]
                 for col_name, col_idx in headers:
                     ws.cell(new_r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
+            elif fill_spec is not None:
+                # Unmatched lower zone row — apply fill to existing cell values.
+                for col_name, col_idx in headers:
+                    current = ws.cell(new_r, col_idx).value
+                    ws.cell(new_r, col_idx).value = _apply_fill(current, col_name, fill_spec)
 
     return rows_inserted
 

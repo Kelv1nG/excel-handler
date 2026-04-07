@@ -742,6 +742,74 @@ def create_template_fill_per_col():
     print("  template_fill_per_col.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_fill_lower_zone.xlsx
+# Outer join with fill=0, insert_data marker, and an unmatched lower zone row.
+# The lower zone row has no df match — fill=0 must still apply to its nulls.
+# Row 1: Index, col1  (headers)
+# Row 2: a,  {{ data | table(join=outer, on=Index, fill=0) }}
+# Row 3:     {{ insert_data }}    ← insertion point
+# Row 4: Total                   ← lower zone (NOT in df; col1 → 0 via fill)
+# Row 5:     {{ end_table }}     ← Option A
+# ---------------------------------------------------------------------------
+def create_template_fill_lower_zone():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "col1"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, on=Index, fill=0) }}"
+
+    ws["B3"] = "{{ insert_data }}"
+
+    ws["A4"] = "Total"
+
+    ws["B5"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_fill_lower_zone.xlsx")
+    wb.close()
+    print("  template_fill_lower_zone.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_fill_sorted_outer_lower_zone.xlsx
+# Sorted outer join with fill=0, insert_data, and an unmatched lower zone row.
+# The unmatched lower zone row must get fill=0, not stay blank.
+# Row 1: Sector, ColValue  (headers)
+# Row 2: Foo,  {{ data | table(join=outer, on=Sector, order_by=asc, fill=0) }}
+# Row 3: Bar
+# Row 4:       {{ insert_data }}    ← insertion point
+# Row 5: No Sector                  ← lower zone: NOT in df → ColValue must be 0
+# Row 6: Total  {{ end_table }}     ← lower zone: matched in df
+# ---------------------------------------------------------------------------
+def create_template_fill_sorted_outer_lower_zone():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Sector"
+    ws["B1"] = "ColValue"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "Foo"
+    ws["B2"] = "{{ data | table(join=outer, on=Sector, order_by=asc, fill=0) }}"
+    ws["A3"] = "Bar"
+
+    ws["B4"] = "{{ insert_data }}"
+
+    ws["A5"] = "No Sector"
+    ws["A6"] = "Total"
+    ws["B6"] = "{{ end_table }}"
+
+    wb.save(FIXTURES_DIR / "template_fill_sorted_outer_lower_zone.xlsx")
+    wb.close()
+    print("  template_fill_sorted_outer_lower_zone.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -768,4 +836,6 @@ if __name__ == "__main__":
     create_template_sorted_outer_tmpl_rows()
     create_template_fill_global()
     create_template_fill_per_col()
+    create_template_fill_lower_zone()
+    create_template_fill_sorted_outer_lower_zone()
     print("Done.")

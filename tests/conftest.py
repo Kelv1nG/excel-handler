@@ -176,3 +176,15 @@ def template_fill_global_path():
 def template_fill_per_col_path():
     """Template with table(join=outer, fill=col1:0;col2:N/A) — per-column fill values."""
     return str(FIXTURES_DIR / "template_fill_per_col.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_fill_lower_zone_path():
+    """Template with fill=0, insert_data, and an unmatched lower zone row — fill applies everywhere."""
+    return str(FIXTURES_DIR / "template_fill_lower_zone.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_fill_sorted_outer_lower_zone_path():
+    """Sorted outer join with fill=0 and an unmatched lower zone row (No Sector) — must get fill."""
+    return str(FIXTURES_DIR / "template_fill_sorted_outer_lower_zone.xlsx")
