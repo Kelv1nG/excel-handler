@@ -477,6 +477,121 @@ def _fill_positional(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             ws.cell(start_row + r_offset, start_col + c_offset).value = row[col_name]
 
 
+def _parse_order_by(cell: MarkedCell) -> tuple[str | None, bool] | None:
+    """Return *(sort_col, ascending)* from an ``order_by`` metadata key, or ``None``.
+
+    Supported forms (only applied when ``join=outer``):
+
+    - ``order_by=asc`` / ``order_by=desc``   → sort by the join column
+    - ``order_by=ColName``                    → sort by *ColName*, ascending
+    - ``order_by=ColName:asc``               → sort by *ColName*, ascending
+    - ``order_by=ColName:desc``              → sort by *ColName*, descending
+
+    Returns ``None`` when no ``order_by`` key is present.
+    *sort_col* is ``None`` when the join column should be used.
+    """
+    order_by = cell.parse_metadata().get("order_by")
+    if order_by is None:
+        return None
+    v = str(order_by).strip()
+    if v.lower() == "asc":
+        return (None, True)
+    if v.lower() == "desc":
+        return (None, False)
+    if ":" in v:
+        col, _, direction = v.partition(":")
+        return (col.strip() or None, direction.strip().lower() != "desc")
+    return (v or None, True)
+
+
+def _sorted_outer_fill(
+    ws,
+    df: pl.DataFrame,
+    tag_row: int,
+    join_tmpl_col: int,
+    join_df_col: str,
+    headers: list[tuple[str, int]],
+    saved_join: dict[int, Any],
+    last_tmpl_row: int,
+    insert_before_row: int | None,
+    order_by: tuple[str | None, bool],
+) -> int:
+    """Write a sorted outer join into the upper zone of a table region.
+
+    All rows from *tag_row* up to (but not including) *insert_before_row* are
+    written top-down in the order given by *order_by*.  Rows at or below
+    *insert_before_row* (the lower zone) keep their template positions and are
+    filled by key-match.
+
+    Returns the number of rows inserted into the worksheet.
+    """
+    sort_col, sort_asc = order_by
+    if sort_col is None:
+        sort_col = join_df_col
+    df_sorted = df.sort(sort_col, descending=not sort_asc, nulls_last=True)
+
+    # Lower zone: join values of all rows at/below insert_before_row.
+    # These are key-matched separately and excluded from the sorted upper zone.
+    lower_vals: set[Any] = set()
+    if insert_before_row is not None:
+        for r in range(insert_before_row, last_tmpl_row + 1):
+            lower_vals.add(saved_join.get(r))
+
+    # Upper zone: all sorted df rows NOT reserved for the lower zone.
+    upper_df = [
+        row
+        for row in df_sorted.iter_rows(named=True)
+        if row[join_df_col] not in lower_vals
+    ]
+    upper_last_row = (
+        insert_before_row - 1 if insert_before_row is not None else last_tmpl_row
+    )
+    n_upper_tmpl = upper_last_row - tag_row + 1
+    n_upper_df = len(upper_df)
+    rows_inserted = 0
+
+    # Insert rows if the sorted df has more rows than available upper zone slots.
+    if n_upper_df > n_upper_tmpl:
+        rows_inserted = n_upper_df - n_upper_tmpl
+        _copy_row_styles(ws, upper_last_row, rows_inserted)
+        upper_last_row += rows_inserted
+        if insert_before_row is not None:
+            insert_before_row += rows_inserted
+            last_tmpl_row += rows_inserted
+        else:
+            last_tmpl_row += rows_inserted
+
+    # Write the sorted upper zone rows top-down.
+    for i, row in enumerate(upper_df):
+        ws_row = tag_row + i
+        ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
+        for col_name, col_idx in headers:
+            ws.cell(ws_row, col_idx).value = row.get(col_name)
+
+    # Clear leftover upper zone slots when the df has fewer rows than slots.
+    for r in range(tag_row + n_upper_df, upper_last_row + 1):
+        ws.cell(r, join_tmpl_col).value = None
+        for _, col_idx in headers:
+            ws.cell(r, col_idx).value = None
+
+    # Write lower zone rows by key-match (template order preserved).
+    if insert_before_row is not None:
+        orig_insert = insert_before_row - rows_inserted
+        df_lookup: dict[Any, dict[str, Any]] = {
+            row[join_df_col]: row for row in df.iter_rows(named=True)
+        }
+        for orig_r, tmpl_val in sorted(saved_join.items()):
+            if orig_r < orig_insert:
+                continue  # upper zone row — already written
+            new_r = orig_r + rows_inserted
+            if tmpl_val in df_lookup:
+                row = df_lookup[tmpl_val]
+                for col_name, col_idx in headers:
+                    ws.cell(new_r, col_idx).value = row.get(col_name)
+
+    return rows_inserted
+
+
 def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     """Fill ws with df data using join semantics described in mc.metadata.
 
@@ -488,6 +603,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
              clear remaining template rows if DF is shorter.
     """
     join_mode, on_col, _ = _parse_table_meta(mc)
+    order_by = _parse_order_by(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
     header_row = tag_row - 1
     join_tmpl_col = tag_col - 1
@@ -589,74 +705,82 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             for r in range(tag_row, last_tmpl_row + 1)
         }
 
-        # outer: insert extra rows BEFORE writing any data.  insert_rows()
-        # can create phantom MergedCell proxies on source_row, silently
-        # destroying values already written there.  By inserting first and
-        # writing matched rows afterwards, all cells are real Cell objects.
-        extra: list[dict[str, Any]] = []
-        if join_mode == "outer":
-            tmpl_vals = set(saved_join.values())
-            extra = [
-                row
-                for row in df.iter_rows(named=True)
-                if row[join_df_col] not in tmpl_vals
-            ]
+        # Sorted outer join: write all upper-zone rows in declared sort order.
+        # This path replaces the standard outer join logic below.
+        if join_mode == "outer" and order_by is not None:
+            rows_inserted = _sorted_outer_fill(
+                ws, df, tag_row, join_tmpl_col, join_df_col,
+                headers, saved_join, last_tmpl_row, insert_before_row, order_by,
+            )
+        else:
+            # outer: insert extra rows BEFORE writing any data.  insert_rows()
+            # can create phantom MergedCell proxies on source_row, silently
+            # destroying values already written there.  By inserting first and
+            # writing matched rows afterwards, all cells are real Cell objects.
+            extra: list[dict[str, Any]] = []
+            if join_mode == "outer":
+                tmpl_vals = set(saved_join.values())
+                extra = [
+                    row
+                    for row in df.iter_rows(named=True)
+                    if row[join_df_col] not in tmpl_vals
+                ]
+                if extra:
+                    rows_inserted = len(extra)
+                    if insert_before_row is not None:
+                        # Option C: insert extras BEFORE the insert_before_row.
+                        # Use the row above as the style source.
+                        style_src = insert_before_row - 1
+                        if style_src < tag_row:
+                            style_src = tag_row
+                        _copy_row_styles(ws, style_src, rows_inserted)
+                        # Rows were inserted after style_src, so
+                        # insert_before_row (and everything below) shifted down.
+                        insert_before_row += rows_inserted
+                        last_tmpl_row += rows_inserted
+                    else:
+                        _copy_row_styles(ws, last_tmpl_row, rows_inserted)
+
+            # After row insertion, saved_join keys may no longer match worksheet
+            # row numbers.  Rebuild the mapping: original template rows that were
+            # at or above the insertion point keep their row number; rows at or
+            # below insert_before_row (Option C) have shifted down by
+            # rows_inserted.
+            if rows_inserted and insert_before_row is not None:
+                shifted_join: dict[int, Any] = {}
+                orig_insert_row = insert_before_row - rows_inserted
+                for orig_r, val in saved_join.items():
+                    if orig_r >= orig_insert_row:
+                        shifted_join[orig_r + rows_inserted] = val
+                    else:
+                        shifted_join[orig_r] = val
+                saved_join = shifted_join
+
+            # Fill / clear matched template rows (safe now — any row insertion
+            # and ghost purge has already happened above).  Use saved_join
+            # instead of re-reading from the worksheet, because the ghost purge
+            # inside _copy_row_styles may have wiped the join column cell.
+            for r in sorted(saved_join):
+                tmpl_val = saved_join[r]
+                if tmpl_val in df_lookup:
+                    row = df_lookup[tmpl_val]
+                    for col_name, col_idx in headers:
+                        ws.cell(r, col_idx).value = row.get(col_name)
+                elif join_mode == "inner":
+                    for _, col_idx in headers:
+                        ws.cell(r, col_idx).value = None
+
             if extra:
-                rows_inserted = len(extra)
                 if insert_before_row is not None:
-                    # Option C: insert extras BEFORE the insert_before_row.
-                    # Use the row above as the style source.
-                    style_src = insert_before_row - 1
-                    if style_src < tag_row:
-                        style_src = tag_row
-                    _copy_row_styles(ws, style_src, rows_inserted)
-                    # Rows were inserted after style_src, so
-                    # insert_before_row (and everything below) shifted down.
-                    insert_before_row += rows_inserted
-                    last_tmpl_row += rows_inserted
+                    # Option C: extras occupy the rows just above insert_before_row.
+                    extra_start = insert_before_row - rows_inserted
                 else:
-                    _copy_row_styles(ws, last_tmpl_row, rows_inserted)
-
-        # After row insertion, saved_join keys may no longer match worksheet
-        # row numbers.  Rebuild the mapping: original template rows that were
-        # at or above the insertion point keep their row number; rows at or
-        # below insert_before_row (Option C) have shifted down by
-        # rows_inserted.
-        if rows_inserted and insert_before_row is not None:
-            shifted_join: dict[int, Any] = {}
-            orig_insert_row = insert_before_row - rows_inserted
-            for orig_r, val in saved_join.items():
-                if orig_r >= orig_insert_row:
-                    shifted_join[orig_r + rows_inserted] = val
-                else:
-                    shifted_join[orig_r] = val
-            saved_join = shifted_join
-
-        # Fill / clear matched template rows (safe now — any row insertion
-        # and ghost purge has already happened above).  Use saved_join
-        # instead of re-reading from the worksheet, because the ghost purge
-        # inside _copy_row_styles may have wiped the join column cell.
-        for r in sorted(saved_join):
-            tmpl_val = saved_join[r]
-            if tmpl_val in df_lookup:
-                row = df_lookup[tmpl_val]
-                for col_name, col_idx in headers:
-                    ws.cell(r, col_idx).value = row.get(col_name)
-            elif join_mode == "inner":
-                for _, col_idx in headers:
-                    ws.cell(r, col_idx).value = None
-
-        if extra:
-            if insert_before_row is not None:
-                # Option C: extras occupy the rows just above insert_before_row.
-                extra_start = insert_before_row - rows_inserted
-            else:
-                extra_start = last_tmpl_row + 1
-            for i, row in enumerate(extra):
-                ws_row = extra_start + i
-                ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
-                for col_name, col_idx in headers:
-                    ws.cell(ws_row, col_idx).value = row.get(col_name)
+                    extra_start = last_tmpl_row + 1
+                for i, row in enumerate(extra):
+                    ws_row = extra_start + i
+                    ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
+                    for col_name, col_idx in headers:
+                        ws.cell(ws_row, col_idx).value = row.get(col_name)
 
     # Delete the {{ end_table }} marker row (Option A).  Row indices may have
     # shifted if extra rows were inserted above, so adjust accordingly.
