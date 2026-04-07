@@ -421,9 +421,11 @@ def _compute_table_region(
     last_col = headers[-1][1] if headers else tag_col
     last_row = _find_last_data_row(ws, tag_row, join_col)
 
-    if join_mode in ("outer", "right"):
-        # Worst case: every DF row is extra
-        last_row = max(last_row, tag_row + df.height - 1)
+    # Collision detection uses the template-only boundary, not a post-insertion
+    # projection.  Vertically stacked tables are processed bottom-up and
+    # insert_rows() shifts the lower table down safely — inflating last_row
+    # here caused false-positive collisions when an outer/right table had a
+    # large DataFrame sitting above a neighbour table.
 
     return tag_row - 1, join_col, last_row, last_col  # include header row
 
