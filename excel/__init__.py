@@ -8,11 +8,14 @@ from excel.exceptions import (
     ExcelFileNotFoundError,
     ExcelPermissionError,
     ExcelCorruptedError,
+    ExcelSheetNotFoundError,
     ExcelTableReaderError,
     TableNotFoundError,
     MultipleTablesFoundError,
     ColumnNamesMismatchError,
     TemplateReadError,
+    KeywordNotFoundError,
+    MultipleKeywordsFoundError,
 )
 
 __all__ = [
@@ -31,10 +34,13 @@ __all__ = [
     "ExcelFileNotFoundError",
     "ExcelPermissionError",
     "ExcelCorruptedError",
+    "ExcelSheetNotFoundError",
     "ExcelTableReaderError",
     "TableNotFoundError",
     "MultipleTablesFoundError",
     "ColumnNamesMismatchError",
     "TemplateReadError",
+    "KeywordNotFoundError",
+    "MultipleKeywordsFoundError",
 ]
 
