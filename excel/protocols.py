@@ -85,6 +85,31 @@ class CellReader(Protocol):
         """
         ...
 
+    def get_relative(
+        self,
+        cell_ref: str | None = None,
+        keyword: str | None = None,
+        *,
+        sheet: str | None = None,
+        right: int = 0,
+        left: int = 0,
+        down: int = 0,
+        up: int = 0,
+    ) -> Any:
+        """Return the value at a directional offset from an anchor cell or keyword."""
+        ...
+
+    def get_many_relative(
+        self,
+        cell_ref: str | None = None,
+        keyword: str | None = None,
+        offsets: dict[str, dict[str, int]] | None = None,
+        *,
+        sheet: str | None = None,
+    ) -> dict[str, Any]:
+        """Return values at multiple offsets from a single anchor."""
+        ...
+
 
 class TableReader(Protocol):
     """Protocol for extracting tabular data from a workbook as Polars DataFrames.

@@ -23,6 +23,12 @@ class ExcelCorruptedError(ExcelError):
     pass
 
 
+class ExcelSheetNotFoundError(ExcelError):
+    """Named worksheet does not exist in the workbook."""
+
+    pass
+
+
 # template reading related errors
 class TemplateReadError(Exception):
     """When reading marked cells"""
@@ -45,6 +51,20 @@ class TableNotFoundError(ExcelTableReaderError):
 
 class MultipleTablesFoundError(ExcelTableReaderError):
     """Multiple table match found"""
+
+    def __init__(self, message: str, found_in: list[str]):
+        super().__init__(message)
+        self.found_in = found_in
+
+
+class KeywordNotFoundError(ExcelError):
+    """Keyword label was not found in any searched sheet."""
+
+    pass
+
+
+class MultipleKeywordsFoundError(ExcelError):
+    """Keyword label was found in more than one cell."""
 
     def __init__(self, message: str, found_in: list[str]):
         super().__init__(message)
