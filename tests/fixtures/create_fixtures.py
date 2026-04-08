@@ -810,6 +810,51 @@ def create_template_fill_sorted_outer_lower_zone():
     print("  template_fill_sorted_outer_lower_zone.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# anchored_cells.xlsx
+# Fixture for ExcelCellReader.get_relative / get_many_relative tests.
+#
+# Sheet1 layout:
+#   A1 = "Revenue Label"   B1 = 5000   C1 = "USD"
+#   A2 = "Tax Label"       B2 = 250
+#   A3 = "Note"
+#
+# Sheet2 layout:
+#   A1 = "Revenue Label"   B1 = 9999   ← duplicate keyword for error tests
+#
+# Tests:
+#   - get_relative(cell_ref="Sheet1!A1", right=1)   → 5000
+#   - get_relative(cell_ref="Sheet1!A1", right=2)   → "USD"
+#   - get_relative(cell_ref="Sheet1!B1", left=1)    → "Revenue Label"
+#   - get_relative(cell_ref="Sheet1!A2", up=1)      → "Revenue Label"
+#   - get_relative(keyword="Revenue Label", sheet="Sheet1", right=1)           → 5000
+#   - get_relative(keyword="Tax Label",    sheet="Sheet1", right=1)            → 250
+#   - get_relative(keyword="Revenue Label", sheet="Sheet1", down=1)            → "Tax Label"
+#   - get_relative(keyword="Revenue Label")  → raises MultipleKeywordsFoundError
+#   - get_relative(keyword="No Such Label") → raises KeywordNotFoundError
+#   - get_many_relative(cell_ref="Sheet1!A1", offsets={...})  → dict
+#   - get_many_relative(keyword="Tax Label", sheet="Sheet1", offsets={...}) → dict
+# ---------------------------------------------------------------------------
+def create_anchored_cells():
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "Sheet1"
+    ws1["A1"] = "Revenue Label"
+    ws1["B1"] = 5000
+    ws1["C1"] = "USD"
+    ws1["A2"] = "Tax Label"
+    ws1["B2"] = 250
+    ws1["A3"] = "Note"
+
+    ws2 = wb.create_sheet("Sheet2")
+    ws2["A1"] = "Revenue Label"
+    ws2["B1"] = 9999
+
+    wb.save(FIXTURES_DIR / "anchored_cells.xlsx")
+    wb.close()
+    print("  anchored_cells.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -838,4 +883,5 @@ if __name__ == "__main__":
     create_template_fill_per_col()
     create_template_fill_lower_zone()
     create_template_fill_sorted_outer_lower_zone()
+    create_anchored_cells()
     print("Done.")

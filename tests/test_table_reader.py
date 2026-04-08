@@ -1,6 +1,8 @@
 import pytest
 from excel.table_reader import ExcelTableReader
 from excel.exceptions import (
+    ExcelError,
+    ExcelSheetNotFoundError,
     ExcelTableReaderError,
     ExcelFileNotFoundError,
     ExcelCorruptedError,
@@ -161,7 +163,7 @@ class TestExtractByRange:
 
     def test_sheet_not_found_raises(self, simple_table_path):
         with ExcelTableReader(simple_table_path) as reader:
-            with pytest.raises(ExcelTableReaderError):
+            with pytest.raises(ExcelSheetNotFoundError):
                 reader.extract_table_by_range("A1:C5", sheet="DoesNotExist")
 
     def test_dynamic_single_row_range_detects_all_data_rows(self, simple_table_path):
@@ -244,7 +246,7 @@ class TestExtractFromCell:
 
     def test_sheet_not_found_raises(self, simple_table_path):
         with ExcelTableReader(simple_table_path) as reader:
-            with pytest.raises(ExcelTableReaderError):
+            with pytest.raises(ExcelSheetNotFoundError):
                 reader.extract_table_from_cell("A1", sheet="DoesNotExist")
 
 
@@ -288,7 +290,7 @@ class TestExtractNearCell:
 
     def test_sheet_not_found_raises(self, simple_table_path):
         with ExcelTableReader(simple_table_path) as reader:
-            with pytest.raises(ExcelTableReaderError):
+            with pytest.raises(ExcelSheetNotFoundError):
                 reader.extract_table_near(["Name"], sheet="DoesNotExist", ref_cell="A1")
 
 
@@ -344,7 +346,7 @@ class TestEdgeCases:
 class TestFileErrors:
     def test_context_manager_required(self):
         reader = ExcelTableReader("any.xlsx")
-        with pytest.raises(ExcelTableReaderError):
+        with pytest.raises(ExcelError):
             reader.extract_table_by_column_names(["Col"])
 
     def test_file_not_found(self):
