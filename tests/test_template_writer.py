@@ -1229,3 +1229,148 @@ class TestFillSortedOuterLowerZone:
         assert ws.cell(self._find_row(ws, "A"), 2).value == 1
         assert ws.cell(self._find_row(ws, "C"), 2).value == 2
         assert ws.cell(self._find_row(ws, "D"), 2).value == 3
+
+
+# ---------------------------------------------------------------------------
+# Scalar tag below an expanding outer-join table
+# ---------------------------------------------------------------------------
+
+class TestScalarBelowExpandingTable:
+    """Regression test for stale-address bug.
+
+    Template (bug-on-insert.xlsx):
+      Row 3: headers  (index, colA, colB)
+      Row 4: B4=1,  C4={{ my_table | table(join=outer) }}
+      Row 5: B5=2
+      Row 6: B6=3,  C6={{ end_table }}
+      Row 7:        C7={{ some_value }}   ← scalar BELOW the table
+
+    5-row DataFrame → 2 extra rows inserted after row 6 → scalar must
+    appear at row 9 and the raw tag must be gone.
+    """
+
+    _SCALAR = "sentinel-scalar-value"
+
+    def _run(self, template_path, tmp_path):
+        df = pl.DataFrame({
+            "index": [1, 2, 3, 4, 5],
+            "colA": ["A", "B", "C", "D", "E"],
+            "colB": [10, 20, 30, 40, 50],
+        })
+        out = str(tmp_path / "output.xlsx")
+        ExcelTemplateWriter(template_path).write(
+            {
+                "my_table": TypedValue(df, "table"),
+                "some_value": TypedValue(self._SCALAR, "single"),
+            },
+            out,
+        )
+        return load_workbook(out)
+
+    def test_scalar_lands_at_shifted_row(self, bug_on_insert_path, tmp_path):
+        """Scalar must appear at row 9 (original row 7 + 2 inserted rows)."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        # Find the scalar value anywhere in the sheet
+        found_at = [
+            cell.row
+            for row in ws.iter_rows(max_row=20)
+            for cell in row
+            if cell.value == self._SCALAR
+        ]
+        assert found_at == [9], (
+            f"Expected scalar at row 9, found at rows {found_at}"
+        )
+
+    def test_raw_tag_not_present_in_output(self, bug_on_insert_path, tmp_path):
+        """The raw {{ some_value }} tag must be cleared from the worksheet."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        orphaned = [
+            cell.coordinate
+            for row in ws.iter_rows(max_row=20)
+            for cell in row
+            if isinstance(cell.value, str) and "some_value" in cell.value
+        ]
+        assert orphaned == [], (
+            f"Raw tag still present at: {orphaned}"
+        )
+
+    def test_table_data_unaffected(self, bug_on_insert_path, tmp_path):
+        """The 5 data rows must sit at rows 4-8 with correct values."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        col_a_values = [ws.cell(r, 3).value for r in range(4, 9)]  # col C
+        assert col_a_values == ["A", "B", "C", "D", "E"]
+
+
+# ---------------------------------------------------------------------------
+# Scalar tag below an expanding outer-join table
+# ---------------------------------------------------------------------------
+
+class TestScalarBelowExpandingTable:
+    """Regression test for stale-address bug.
+
+    Template (bug-on-insert.xlsx):
+      Row 3: headers  (index, colA, colB)
+      Row 4: B4=1,  C4={{ my_table | table(join=outer) }}
+      Row 5: B5=2
+      Row 6: B6=3,  C6={{ end_table }}
+      Row 7:        C7={{ some_value }}   <- scalar BELOW the table
+
+    5-row DataFrame -> 2 extra rows inserted after row 6 -> scalar must
+    appear at row 9 and the raw tag must be gone.
+    """
+
+    _SCALAR = "sentinel-scalar-value"
+
+    def _run(self, template_path, tmp_path):
+        df = pl.DataFrame({
+            "index": [1, 2, 3, 4, 5],
+            "colA": ["A", "B", "C", "D", "E"],
+            "colB": [10, 20, 30, 40, 50],
+        })
+        out = str(tmp_path / "output.xlsx")
+        ExcelTemplateWriter(template_path).write(
+            {
+                "my_table": TypedValue(df, "table"),
+                "some_value": TypedValue(self._SCALAR, "single"),
+            },
+            out,
+        )
+        return load_workbook(out)
+
+    def test_scalar_lands_at_shifted_row(self, bug_on_insert_path, tmp_path):
+        """Scalar must appear at row 9 (original row 7 + 2 inserted rows)."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        found_at = [
+            cell.row
+            for row in ws.iter_rows(max_row=20)
+            for cell in row
+            if cell.value == self._SCALAR
+        ]
+        assert found_at == [9], (
+            f"Expected scalar at row 9, found at rows {found_at}"
+        )
+
+    def test_raw_tag_not_present_in_output(self, bug_on_insert_path, tmp_path):
+        """The raw {{ some_value }} tag must be cleared from the worksheet."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        orphaned = [
+            cell.coordinate
+            for row in ws.iter_rows(max_row=20)
+            for cell in row
+            if isinstance(cell.value, str) and "some_value" in cell.value
+        ]
+        assert orphaned == [], (
+            f"Raw tag still present at: {orphaned}"
+        )
+
+    def test_table_data_unaffected(self, bug_on_insert_path, tmp_path):
+        """The 5 data rows must sit at rows 4-8 with correct colA values."""
+        wb = self._run(bug_on_insert_path, tmp_path)
+        ws = wb.active
+        col_a_values = [ws.cell(r, 3).value for r in range(4, 9)]  # col C (colA)
+        assert col_a_values == ["A", "B", "C", "D", "E"]

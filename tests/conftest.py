@@ -198,3 +198,12 @@ def template_fill_lower_zone_path():
 def template_fill_sorted_outer_lower_zone_path():
     """Sorted outer join with fill=0 and an unmatched lower zone row (No Sector) — must get fill."""
     return str(FIXTURES_DIR / "template_fill_sorted_outer_lower_zone.xlsx")
+
+
+@pytest.fixture(scope="session")
+def bug_on_insert_path():
+    """Template with a scalar tag ({{ some_value }}) one row below {{ end_table }}.
+    Used to reproduce the stale-address bug where scalars below an expanding
+    outer join table landed on the wrong row.
+    """
+    return str(Path(__file__).parent.parent / "bug-on-insert.xlsx")
