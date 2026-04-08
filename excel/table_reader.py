@@ -4,6 +4,8 @@ import polars as pl
 from typing import cast
 from types import TracebackType
 from excel.exceptions import (
+    ExcelError,
+    ExcelSheetNotFoundError,
     ExcelTableReaderError,
     TableNotFoundError,
     MultipleTablesFoundError,
@@ -40,7 +42,7 @@ class ExcelTableReader:
             ExcelTableReaderError: If workbook not loaded
         """
         if self._wb is None:
-            raise ExcelTableReaderError(
+            raise ExcelError(
                 "Workbook not loaded. Use ExcelTableReader as context manager:\n"
                 "    with ExcelTableReader('file.xlsx') as reader:\n"
                 "        df = reader.extract_table_by_column_names([...])"
@@ -556,7 +558,7 @@ class ExcelTableReader:
         """
 
         if sheet_name not in self.wb.sheetnames:
-            raise ExcelTableReaderError(
+            raise ExcelSheetNotFoundError(
                 f"Sheet '{sheet_name}' not found in {self.filepath}. "
                 f"Available sheets: {self.wb.sheetnames}"
             )

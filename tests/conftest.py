@@ -79,6 +79,16 @@ def template_left_join_path():
 
 
 @pytest.fixture(scope="session")
+def anchored_cells_path():
+    """Labeled cells for get_relative / get_many_relative tests.
+
+    Sheet1: A1='Revenue Label' B1=5000 C1='USD', A2='Tax Label' B2=250
+    Sheet2: A1='Revenue Label' B1=9999  (duplicate for multi-keyword error tests)
+    """
+    return str(FIXTURES_DIR / "anchored_cells.xlsx")
+
+
+@pytest.fixture(scope="session")
 def template_vertical_merge_path():
     """Template with a 3-row vertical merge (A5:A7) below last data row, with blank separator."""
     return str(FIXTURES_DIR / "template_vertical_merge.xlsx")
