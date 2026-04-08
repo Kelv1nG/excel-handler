@@ -984,6 +984,27 @@ class ExcelTemplateWriter:
                 else:
                     scalars.append(cell)
 
+        # ── Scalar cells ───────────────────────────────────────────────────────
+        # Write scalars FIRST — before any row insertions from loop or table
+        # processing.  openpyxl shifts all cells below an insert_rows() call,
+        # so values already written here will ride along to their correct final
+        # positions.  Writing scalars after insertions would use stale addresses
+        # and land on the wrong rows.
+        for mc in scalars:
+            ws = wb[mc.sheet]
+            row_n, col_n = coordinate_to_tuple(mc.cell_addr)
+            if "." in mc.name:
+                var_name, col_name = mc.name.split(".", 1)
+                tv = vars[var_name]
+                if tv.value.height != 1:
+                    raise ValueError(
+                        f"Record variable '{var_name}' has {tv.value.height} rows;"
+                        " expected exactly 1"
+                    )
+                ws.cell(row_n, col_n).value = tv.value[col_name][0]
+            else:
+                ws.cell(row_n, col_n).value = vars[mc.name].value
+
         # ── Loop rows ──────────────────────────────────────────────────────────
         # Group by sheet then process each sheet's rows bottom-up so row inserts
         # don't invalidate later row indices within the same sheet.
@@ -1045,21 +1066,5 @@ class ExcelTemplateWriter:
                     _fill_positional(ws, mc, vars[mc.name].value)
                 else:
                     _fill_table(ws, mc, vars[mc.name].value)
-
-        # ── Scalar cells ───────────────────────────────────────────────────────
-        for mc in scalars:
-            ws = wb[mc.sheet]
-            row_n, col_n = coordinate_to_tuple(mc.cell_addr)
-            if "." in mc.name:
-                var_name, col_name = mc.name.split(".", 1)
-                tv = vars[var_name]
-                if tv.value.height != 1:
-                    raise ValueError(
-                        f"Record variable '{var_name}' has {tv.value.height} rows;"
-                        " expected exactly 1"
-                    )
-                ws.cell(row_n, col_n).value = tv.value[col_name][0]
-            else:
-                ws.cell(row_n, col_n).value = vars[mc.name].value
 
         wb.save(file)
