@@ -1374,3 +1374,126 @@ class TestScalarBelowExpandingTable:
         ws = wb.active
         col_a_values = [ws.cell(r, 3).value for r in range(4, 9)]  # col C (colA)
         assert col_a_values == ["A", "B", "C", "D", "E"]
+
+
+# ---------------------------------------------------------------------------
+# placeholder=True — tag row deleted when unmatched; Total pinned via Option C
+# ---------------------------------------------------------------------------
+
+class TestPlaceholderOuter:
+    """placeholder=True on a blank tag row with end_table|insert=above on Total."""
+
+    _DF = pl.DataFrame({
+        "Index": ["a", "b", "c", "Total"],
+        "Value": [1, 2, 3, 99],
+    })
+
+    def _run(self, template_path, tmp_path):
+        out = str(tmp_path / "output.xlsx")
+        writer = ExcelTemplateWriter(template_path)
+        writer.write({"data": TypedValue(self._DF, "table")}, out)
+        return load_workbook(out)
+
+    def test_no_phantom_blank_row(self, template_placeholder_outer_path, tmp_path):
+        """The blank placeholder tag row must be deleted; output starts with data at row 2."""
+        wb = self._run(template_placeholder_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).value == "a", (
+            f"Expected 'a' at A2 (placeholder row deleted), got {ws.cell(2, 1).value!r}"
+        )
+
+    def test_data_rows_in_order(self, template_placeholder_outer_path, tmp_path):
+        """Rows a, b, c must appear in order before Total."""
+        wb = self._run(template_placeholder_outer_path, tmp_path)
+        ws = wb.active
+        index_values = [ws.cell(r, 1).value for r in range(2, 6)]
+        assert index_values == ["a", "b", "c", "Total"], (
+            f"Unexpected row order: {index_values}"
+        )
+
+    def test_total_row_pinned_last(self, template_placeholder_outer_path, tmp_path):
+        """Total must be the last data row; row after it must be empty."""
+        wb = self._run(template_placeholder_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(5, 1).value == "Total"
+        assert ws.cell(6, 1).value is None
+
+    def test_total_value_filled(self, template_placeholder_outer_path, tmp_path):
+        """Total Value column must be filled from the DataFrame."""
+        wb = self._run(template_placeholder_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(5, 2).value == 99
+
+
+# ---------------------------------------------------------------------------
+# style=first / style=last — control which row new rows copy their style from
+# ---------------------------------------------------------------------------
+
+class TestStyleSrcMode:
+    """Inserted rows inherit style from last_tmpl_row (Total: bold+yellow) or
+    from tag_row (plain row), depending on style=last|first in the tag."""
+
+    # DataFrame has 2 extra rows (b, c) that trigger insertion.
+    _DF = pl.DataFrame({
+        "Index": ["a", "b", "c", "Total"],
+        "Value": [10, 20, 30, 100],
+    })
+
+    def _run(self, template_path, tmp_path):
+        out = str(tmp_path / "output.xlsx")
+        writer = ExcelTemplateWriter(template_path)
+        writer.write({"data": TypedValue(self._DF, "table")}, out)
+        return load_workbook(out)
+
+    def test_style_last_inserted_rows_are_bold(
+        self, template_style_src_last_path, tmp_path
+    ):
+        """style=last (default): inserted rows copy from Total row — must be bold."""
+        wb = self._run(template_style_src_last_path, tmp_path)
+        ws = wb.active
+        # Rows 4 and 5 are the inserted extra rows (b, c)
+        assert ws.cell(4, 1).font.bold is True, (
+            "style=last: inserted row 4 should be bold (copied from Total row)"
+        )
+        assert ws.cell(5, 1).font.bold is True, (
+            "style=last: inserted row 5 should be bold (copied from Total row)"
+        )
+
+    def test_style_last_inserted_rows_have_yellow_fill(
+        self, template_style_src_last_path, tmp_path
+    ):
+        """style=last (default): inserted rows copy Total's yellow fill."""
+        wb = self._run(template_style_src_last_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(4, 1).fill.fill_type == "solid", (
+            "style=last: inserted row 4 should have solid fill (copied from Total row)"
+        )
+        assert ws.cell(5, 1).fill.fill_type == "solid", (
+            "style=last: inserted row 5 should have solid fill (copied from Total row)"
+        )
+
+    def test_style_first_inserted_rows_not_bold(
+        self, template_style_src_first_path, tmp_path
+    ):
+        """style=first: inserted rows copy from plain tag row — must NOT be bold."""
+        wb = self._run(template_style_src_first_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(4, 1).font.bold is not True, (
+            "style=first: inserted row 4 should not be bold (copied from plain tag row)"
+        )
+        assert ws.cell(5, 1).font.bold is not True, (
+            "style=first: inserted row 5 should not be bold (copied from plain tag row)"
+        )
+
+    def test_style_first_inserted_rows_no_solid_fill(
+        self, template_style_src_first_path, tmp_path
+    ):
+        """style=first: inserted rows copy plain tag row — must NOT have solid fill."""
+        wb = self._run(template_style_src_first_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(4, 1).fill.fill_type != "solid", (
+            "style=first: inserted row 4 should not have solid fill"
+        )
+        assert ws.cell(5, 1).fill.fill_type != "solid", (
+            "style=first: inserted row 5 should not have solid fill"
+        )

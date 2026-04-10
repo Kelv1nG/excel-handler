@@ -93,18 +93,34 @@ def _is_table(cell: MarkedCell) -> bool:
     return cell.parse_metadata().get("type") == "table"
 
 
-def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None, bool]:
-    """Return (join_mode, on_col_override_or_None, positional).
+def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None, bool, bool, str]:
+    """Return (join_mode, on_col_override_or_None, positional, placeholder, style_src_mode).
 
     *positional* is True when ``table(positional=True)`` is used — rows/columns
     are written by position with no join column or header matching.
     Default join mode is 'left'.
+
+    *placeholder* is True when ``table(placeholder=true)`` is used — the tag row
+    is used as the style source for inserted rows, then deleted from the output if
+    its join value is not present in the DataFrame.  No-op for ``join=right``.
+
+    *style_src_mode* is ``"first"`` or ``"last"`` (default).  Controls which
+    template row is used as the style source when new rows are inserted:
+    - ``"first"`` — copies style from ``tag_row`` (always a plain data row).
+    - ``"last"`` — copies style from ``last_tmpl_row`` (current/default behaviour).
     """
     meta = cell.parse_metadata()
     positional = bool(meta.get("positional", False))
     join_mode = str(meta.get("join", "left"))
     on_col = str(meta["on"]) if "on" in meta else None
-    return join_mode, on_col, positional
+    placeholder = bool(meta.get("placeholder", False))
+    style_src_mode = str(meta.get("style", "last"))
+    if style_src_mode not in ("first", "last"):
+        raise ValueError(
+            f"Invalid style={style_src_mode!r} in tag {cell.raw!r}. "
+            "Expected 'first' or 'last'."
+        )
+    return join_mode, on_col, positional, placeholder, style_src_mode
 
 
 def _get_style_source(ws, row: int, col: int):
@@ -478,7 +494,7 @@ def _compute_table_region(
     Column span is join_col through the last header column.
     For ``positional=True`` tables, the region is tag_cell to tag_cell + df shape.
     """
-    join_mode, _, positional = _parse_table_meta(mc)
+    join_mode, _, positional, _, _ = _parse_table_meta(mc)
     if positional:
         start_row, start_col = coordinate_to_tuple(mc.cell_addr)
         return start_row, start_col, start_row + df.height - 1, start_col + df.width - 1
@@ -716,7 +732,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     - order_by=asc/desc: sort upper zone by join column ascending/descending.
     - order_by=ColName[:asc|:desc]: sort by named column (default asc).
     """
-    join_mode, on_col, _ = _parse_table_meta(mc)
+    join_mode, on_col, _, placeholder, style_src_mode = _parse_table_meta(mc)
     order_by = _parse_order_by(mc)
     fill_spec = _parse_fill_spec(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
@@ -796,7 +812,8 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         n_df = len(df_list)
         if n_df > n_tmpl:
             rows_inserted = n_df - n_tmpl
-            _copy_row_styles(ws, last_tmpl_row, rows_inserted)
+            style_src = tag_row if style_src_mode == "first" else last_tmpl_row
+            _copy_row_styles(ws, style_src, rows_inserted)
         for i, row in enumerate(df_list):
             ws_row = tag_row + i
             ws.cell(ws_row, join_tmpl_col).value = row.get(join_df_col)
@@ -844,17 +861,21 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     rows_inserted = len(extra)
                     if insert_before_row is not None:
                         # Option C: insert extras BEFORE the insert_before_row.
-                        # Use the row above as the style source.
-                        style_src = insert_before_row - 1
-                        if style_src < tag_row:
+                        # Use the row above as the style source (unless style=first).
+                        if style_src_mode == "first":
                             style_src = tag_row
+                        else:
+                            style_src = insert_before_row - 1
+                            if style_src < tag_row:
+                                style_src = tag_row
                         _copy_row_styles(ws, style_src, rows_inserted)
                         # Rows were inserted after style_src, so
                         # insert_before_row (and everything below) shifted down.
                         insert_before_row += rows_inserted
                         last_tmpl_row += rows_inserted
                     else:
-                        _copy_row_styles(ws, last_tmpl_row, rows_inserted)
+                        style_src = tag_row if style_src_mode == "first" else last_tmpl_row
+                        _copy_row_styles(ws, style_src, rows_inserted)
 
             # After row insertion, saved_join keys may no longer match worksheet
             # row numbers.  Rebuild the mapping: original template rows that were
@@ -913,6 +934,17 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
         # Sync the merge registry for the same reason as the insert_data delete.
         _sync_merges_after_delete(ws, delete_end_row + rows_inserted)
 
+    # Delete placeholder row (outer join, non-sorted only).  The tag row is used
+    # as the style source for inserted rows, then removed if its join value is
+    # absent from the DataFrame.  Deletion is done last so the row is available
+    # as a style source throughout, and after delete_end_row so that the end_table
+    # row (which is always below the tag row) is gone first — keeping index stable.
+    if placeholder and join_mode == "outer" and order_by is None:
+        tag_join_val = saved_join.get(tag_row)
+        if tag_join_val not in df_lookup:
+            ws.delete_rows(tag_row)
+            _sync_merges_after_delete(ws, tag_row)
+
 
 class ExcelTemplateWriter:
     """Fill an Excel template with data and write the output file.
@@ -930,6 +962,13 @@ class ExcelTemplateWriter:
       - order_by=[asc|desc|ColName[:asc|:desc]]: sort outer join by column (outer only).
       - fill=[value|col1:<v1>;col2:<v2>]: fill None values globally or per-column.
       - positional=True: fill by position, no join column or header matching.
+      - placeholder=true: tag row is used as style source for inserted rows, then
+        deleted from output if its join value is absent from the DataFrame.
+        Useful when the template has 0 real data rows between headers and a pinned
+        row (e.g. Total).  Only applies to ``join=outer``; ignored for other modes.
+      - style=first|last (default ``last``): which template row to copy styles from
+        when inserting new rows.  ``first`` copies from the tag row (plain data row
+        style); ``last`` copies from the last template row (current behaviour).
     * ``{{ end_table }}`` — marks table boundary (optional); inserted row(s) after.
     * ``{{ end_table | insert=above }}`` — marks table boundary; inserted row(s) before.
     * ``{{ insert_data }}`` — marks insertion point for outer join extras (optional).
@@ -1061,7 +1100,7 @@ class ExcelTemplateWriter:
             for mc in sorted(
                 mcs, key=lambda c: coordinate_to_tuple(c.cell_addr)[0], reverse=True
             ):
-                _, _, positional = _parse_table_meta(mc)
+                _, _, positional, _, _ = _parse_table_meta(mc)
                 if positional:
                     _fill_positional(ws, mc, vars[mc.name].value)
                 else:
