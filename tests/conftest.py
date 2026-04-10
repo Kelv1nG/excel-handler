@@ -207,3 +207,27 @@ def bug_on_insert_path():
     outer join table landed on the wrong row.
     """
     return str(Path(__file__).parent.parent / "bug-on-insert.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_placeholder_outer_path():
+    """Template with placeholder=true tag and end_table|insert=above on Total row.
+    Row 1: headers. Row 2: blank join col + tag (plain style). Row 3: Total (bold, yellow).
+    """
+    return str(FIXTURES_DIR / "template_placeholder_outer.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_style_src_last_path():
+    """Template with default style (style=last). Row 2: plain tag row. Row 3: Total (bold, yellow).
+    Used to verify inserted rows inherit the last template row's style (bold + yellow).
+    """
+    return str(FIXTURES_DIR / "template_style_src_last.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_style_src_first_path():
+    """Template with style=first. Row 2: plain tag row. Row 3: Total (bold, yellow).
+    Used to verify inserted rows inherit the tag row's plain style, NOT the Total row style.
+    """
+    return str(FIXTURES_DIR / "template_style_src_first.xlsx")

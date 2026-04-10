@@ -855,6 +855,94 @@ def create_anchored_cells():
     print("  anchored_cells.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_placeholder_outer.xlsx
+# Template for placeholder=true + end_table|insert=above tests.
+# Row 1: headers (Index, Value)
+# Row 2: blank Index, {{ data | table(join=outer, placeholder=true) }} — plain
+# Row 3: Total, {{ end_table | insert=above }} — bold + yellow fill
+# Tests: placeholder row deleted when unmatched; Total pinned via Option C
+# ---------------------------------------------------------------------------
+def create_template_placeholder_outer():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    # Row 2: blank join col, tag cell (plain style — no bold, no fill)
+    ws["B2"] = "{{ data | table(join=outer, placeholder=true) }}"
+
+    # Row 3: Total row — bold + yellow fill
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    wb.save(FIXTURES_DIR / "template_placeholder_outer.xlsx")
+    wb.close()
+    print("  template_placeholder_outer.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_style_src_last.xlsx — style=last (default)
+# template_style_src_first.xlsx — style=first
+# Both: Row 1 headers, Row 2 plain data row (tag), Row 3 Total (bold + yellow)
+# Tests: style=last → inserted rows inherit bold/yellow;
+#        style=first → inserted rows inherit plain style
+# ---------------------------------------------------------------------------
+def create_template_style_src_last():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer) }}"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = 100
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    wb.save(FIXTURES_DIR / "template_style_src_last.xlsx")
+    wb.close()
+    print("  template_style_src_last.xlsx")
+
+
+def create_template_style_src_first():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["A2"] = "a"
+    ws["B2"] = "{{ data | table(join=outer, style=first) }}"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = 100
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    wb.save(FIXTURES_DIR / "template_style_src_first.xlsx")
+    wb.close()
+    print("  template_style_src_first.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -884,4 +972,7 @@ if __name__ == "__main__":
     create_template_fill_lower_zone()
     create_template_fill_sorted_outer_lower_zone()
     create_anchored_cells()
+    create_template_placeholder_outer()
+    create_template_style_src_last()
+    create_template_style_src_first()
     print("Done.")
