@@ -188,12 +188,30 @@ def _sync_merges_after_delete(ws, deleted_row: int) -> None:
     for m in list(ws.merged_cells.ranges):
         if m.max_row < deleted_row:
             continue  # fully above the deleted row — no change needed
-        _safe_remove_merge(ws, m)
         if m.min_row > deleted_row:
-            # Fully below: shift both bounds up by 1
-            updated.append((m.min_row - 1, m.min_col, m.max_row - 1, m.max_col))
+            # Fully below: shift both bounds up by 1.
+            # IMPORTANT: delete_rows() has already shifted ws._cells, so the
+            # ghost cells that belonged to this merge now live at the *shifted*
+            # positions (min_row-1 … max_row-1), not at the stale registry
+            # positions (min_row … max_row).  Using _safe_remove_merge (which
+            # iterates the stale positions) would purge interior ghosts of the
+            # adjacent merge sitting just below this one, and leave this
+            # merge's own ghosts uncleaned — causing the re-registered range to
+            # be silently dropped on save when adjacent same-column-span merges
+            # are present.  Purge at the correct shifted positions instead.
+            new_min_r = m.min_row - 1
+            new_max_r = m.max_row - 1
+            ws.merged_cells.ranges.discard(m)
+            for r in range(new_min_r, new_max_r + 1):
+                for c in range(m.min_col, m.max_col + 1):
+                    if isinstance(ws._cells.get((r, c)), _MC):
+                        del ws._cells[(r, c)]
+            updated.append((new_min_r, m.min_col, new_max_r, m.max_col))
         elif m.max_row >= deleted_row:
-            # Spans the deleted row: shrink max_row by 1
+            # Spans the deleted row: shrink max_row by 1.
+            # Rows above deleted_row are unshifted so _safe_remove_merge's
+            # stale-coord ghost purge is correct for those rows.
+            _safe_remove_merge(ws, m)
             new_max = m.max_row - 1
             if new_max >= m.min_row:
                 updated.append((m.min_row, m.min_col, new_max, m.max_col))
@@ -271,11 +289,17 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
     inserted_start = source_row + 1
     inserted_end = source_row + count
 
-    for min_r, min_c, max_r, max_c in saved_merges:
+    # Process saved_merges in DESCENDING min_r order for fully-below merges.
+    # When two same-column-span merges are adjacent (e.g. A26:N26 and A27:N34),
+    # openpyxl silently rejects ws.merge_cells(A30:N30) because the stale A27:N34
+    # range (rows 27-34) is still in the registry and row 30 falls inside it.
+    # Processing the higher-row merge first removes that stale entry before we
+    # try to register the shifted lower-row range.  Spanning merges (min_r <=
+    # source_row) are unaffected by this ordering change.
+    for min_r, min_c, max_r, max_c in sorted(saved_merges, key=lambda x: x[0], reverse=True):
         if min_r > source_row:
-            # Merge fully BELOW — insert_rows() has already shifted it to
-            # (min_r+count … max_r+count).  Use the pre-saved value because
-            # the top-left may now be a MergedCell ghost returning None.
+            # Merge fully BELOW — use the pre-saved value because the top-left
+            # may now be a MergedCell ghost returning None.
             key = (min_r, min_c, max_r, max_c)
             saved_value = merged_cell_values.get(key)
             # openpyxl may keep the original stale range, shift it, or both.
