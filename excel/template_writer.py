@@ -306,6 +306,11 @@ def _sync_merges_after_delete(ws: Worksheet, deleted_row: int) -> None:
     ``_copy_row_styles``) see accurate row numbers.
     """
     updated: list[tuple[int, int, int, int]] = []
+    # Non-top-left border data keyed by (new_min_r, min_c, new_max_r, max_c)
+    # so it can be restored after ws.merge_cells() re-creates the MergedCell
+    # proxies with blank style.  delete_rows() has already physically shifted
+    # the cell objects to their new positions before this function runs.
+    nontopleft_border_restore: dict[tuple[int, int, int, int], dict[tuple[int, int], Any]] = {}
     for m in list(ws.merged_cells.ranges):
         if m.max_row < deleted_row:
             continue  # fully above the deleted row — no change needed
@@ -322,6 +327,18 @@ def _sync_merges_after_delete(ws: Worksheet, deleted_row: int) -> None:
             # are present.  Purge at the correct shifted positions instead.
             new_min_r = m.min_row - 1
             new_max_r = m.max_row - 1
+            # Snapshot non-TL cell borders at their already-shifted positions
+            # before the purge loop destroys them.
+            nontl: dict[tuple[int, int], Any] = {}
+            for r in range(new_min_r, new_max_r + 1):
+                for c in range(m.min_col, m.max_col + 1):
+                    if r == new_min_r and c == m.min_col:
+                        continue  # top-left: real Cell, not purged
+                    cell = ws._cells.get((r, c))
+                    if isinstance(cell, _MC) and cell.has_style:
+                        nontl[(r - new_min_r, c - m.min_col)] = copy(cell.border)
+            if nontl:
+                nontopleft_border_restore[(new_min_r, m.min_col, new_max_r, m.max_col)] = nontl
             ws.merged_cells.ranges.discard(m)
             for r in range(new_min_r, new_max_r + 1):
                 for c in range(m.min_col, m.max_col + 1):
@@ -342,6 +359,15 @@ def _sync_merges_after_delete(ws: Worksheet, deleted_row: int) -> None:
             start_row=min_r, start_column=min_c,
             end_row=max_r, end_column=max_c,
         )
+        # Restore non-TL borders after merge_cells created fresh proxies.
+        nontl = nontopleft_border_restore.get((min_r, min_c, max_r, max_c))
+        if nontl:
+            for (dr, dc), saved_border in nontl.items():
+                target_r, target_c = min_r + dr, min_c + dc
+                mc = ws._cells.get((target_r, target_c))
+                if mc is not None:
+                    mc.border = copy(saved_border)
+
 
 
 def _copy_row_styles(
@@ -425,6 +451,30 @@ def _copy_row_styles(
                     "alignment": copy(style_cell.alignment),
                 }
 
+    # Snapshot border data for every non-top-left cell of fully-below merged
+    # ranges.  Excel-created files store per-cell border info on every cell
+    # within a merge so that each edge of the merged rectangle renders
+    # correctly (e.g. the right border of a 2-column merge lives on the
+    # rightmost column's cell, not on the top-left).  _safe_remove_merge purges
+    # these MergedCell objects, destroying that data.  Capture it here—keyed by
+    # (dr, dc) offsets from the top-left—so it can be rewritten onto the
+    # freshly created MergedCell proxies after ws.merge_cells() below.
+    # Key: (min_r, min_c, max_r, max_c); value: {(dr, dc): Border}
+    merged_nontopleft_borders: dict[tuple[int, int, int, int], dict[tuple[int, int], Any]] = {}
+    for min_r, min_c, max_r, max_c in saved_merges:
+        if min_r <= source_row:
+            continue  # spanning or at-source merges — skip
+        per_cell: dict[tuple[int, int], Any] = {}
+        for r in range(min_r, max_r + 1):
+            for c in range(min_c, max_c + 1):
+                if r == min_r and c == min_c:
+                    continue  # top-left handled by merged_cell_styles
+                cell = ws._cells.get((r, c))
+                if cell is not None and cell.has_style:
+                    per_cell[(r - min_r, c - min_c)] = copy(cell.border)
+        if per_cell:
+            merged_nontopleft_borders[(min_r, min_c, max_r, max_c)] = per_cell
+
     ws.insert_rows(source_row + 1, count)
 
     # insert_rows() correctly shifts merges fully above or below the insertion
@@ -478,6 +528,17 @@ def _copy_row_styles(
                 new_top_left.number_format = saved_style["number_format"]
                 new_top_left.protection = copy(saved_style["protection"])
                 new_top_left.alignment = copy(saved_style["alignment"])
+            # Restore per-cell border data for non-top-left cells.  After
+            # ws.merge_cells() above these positions hold fresh MergedCell
+            # proxies; writing .border to them preserves the edge-rendering
+            # borders that were present in the original Excel-created file.
+            non_tl = merged_nontopleft_borders.get((min_r, min_c, max_r, max_c))
+            if non_tl:
+                for (dr, dc), saved_border in non_tl.items():
+                    target_r, target_c = min_r + count + dr, min_c + dc
+                    mc = ws._cells.get((target_r, target_c))
+                    if mc is not None:
+                        mc.border = copy(saved_border)
             continue
 
         # Only spanning merges need manual correction.
