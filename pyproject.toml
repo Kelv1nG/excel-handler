@@ -1,6 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 
+
 [project]
 name = "template-writer"
 version = "0.1.0"
