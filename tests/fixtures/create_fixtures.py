@@ -6,7 +6,7 @@ Run this script to (re)generate all Excel test fixtures.
 
 from pathlib import Path
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, Color
 
 FIXTURES_DIR = Path(__file__).parent
 
@@ -856,6 +856,187 @@ def create_anchored_cells():
 
 
 # ---------------------------------------------------------------------------
+# bug-on-insert.xlsx
+# Template for testing scalar cells below an expanding outer-join table.
+# Includes border styling on rows 17-18 and 21-27 for comprehensive merge/
+# border preservation tests.
+# 
+# Row 3-10: First test case - simple outer join with scalar below
+# Row 12-14: Second test case - placeholder + style=first
+# Row 17-18: table border styles (thick/thin mix, bold text with theme colors)
+# Row 21-27: complex border structure + fill + scalar placeholder
+# ---------------------------------------------------------------------------
+def create_bug_on_insert():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    
+    # === FIRST TEST CASE: rows 3-10 ===
+    ws["B3"] = "index"
+    ws["C3"] = "colA"
+    ws["D3"] = "colB"
+    
+    ws["B4"] = "a"
+    ws["C4"] = "{{ my_table | table(join=outer) }}"
+    
+    ws["B5"] = "b"
+    ws["B6"] = "c"
+    
+    ws["C7"] = "{{ insert_data }}"
+    
+    ws["B8"] = "d"
+    ws["D8"] = None
+    ws["B8"].font = Font(bold=True, color=Color(theme=1))
+    ws["D8"].font = Font(bold=True, color=Color(theme=1))
+    
+    ws["B9"] = "Total"
+    ws["C9"] = "{{ end_table }}"
+    ws["B9"].font = Font(bold=True, color=Color(theme=1))
+    ws["C9"].font = Font(bold=True, color=Color(theme=1))
+    
+    ws["B10"] = None
+    ws["C10"] = None
+    ws["B10"].font = Font(bold=True, color=Color(theme=1))
+    ws["C10"].font = Font(bold=True, color=Color(theme=1))
+    
+    # === SECOND TEST CASE: rows 12-14 (placeholder=True, style=first) ===
+    ws["B12"] = "index"
+    ws["C12"] = "colA"
+    ws["D12"] = "colB"
+    
+    ws["C13"] = "{{ my_table | table(join=outer, placeholder=True, style=first) }}"
+    
+    ws["B14"] = "Total"
+    ws["C14"] = "{{ end_table | insert=above }}"
+    ws["D14"] = None
+    ws["B14"].font = Font(bold=True, color=Color(theme=1))
+    ws["C14"].font = Font(bold=True, color=Color(theme=1))
+    ws["D14"].font = Font(bold=True, color=Color(theme=1))
+    
+    # === STYLED SECTION 1: rows 17-18 (borders) ===
+    ws["B17"] = "headerColumn1"
+    ws["B17"].font = Font(bold=True, color=Color(theme=1))
+    ws["B17"].border = Border(
+        left=Side(style="thick", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thick", color=Color(theme=1)),
+        bottom=Side(style="thin", color=Color(theme=1))
+    )
+    ws["B17"].alignment = Alignment(horizontal="center")
+    
+    ws["C17"] = None
+    ws["C17"].font = Font(color=Color(theme=1))
+    ws["C17"].border = Border(
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thick", color=Color(theme=1)),
+        bottom=Side(style="thin", color=Color(theme=1))
+    )
+    
+    ws["D17"] = "MergedCol1"
+    ws["D17"].font = Font(bold=True, color=Color(theme=1))
+    ws["D17"].border = Border(
+        left=Side(style="thin", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thick", color=Color(theme=1)),
+        bottom=Side(style="thin", color=Color(theme=1))
+    )
+    ws["D17"].alignment = Alignment(horizontal="center")
+    
+    ws["B18"] = "subheaderColumn1"
+    ws["B18"].font = Font(bold=True, color=Color(theme=1))
+    ws["B18"].border = Border(
+        left=Side(style="thick", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thin", color=Color(theme=1)),
+        bottom=Side(style="thick", color=Color(theme=1))
+    )
+    
+    ws["C18"] = "subheaderColumn2"
+    ws["C18"].font = Font(bold=True, color=Color(theme=1))
+    ws["C18"].border = Border(
+        left=Side(style="thin", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thin", color=Color(theme=1)),
+        bottom=Side(style="thick", color=Color(theme=1))
+    )
+    
+    ws["D18"] = None
+    ws["D18"].font = Font(color=Color(theme=1))
+    ws["D18"].border = Border(
+        left=Side(style="thin", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        bottom=Side(style="thick", color=Color(theme=1))
+    )
+    
+    # === STYLED SECTION 2: rows 21-27 (borders + fill + scalar) ===
+    ws["B21"] = "some text here"
+    ws["B21"].font = Font(color=Color(theme=0))
+    ws["B21"].fill = PatternFill(
+        start_color=Color(theme=4, tint=-0.249977111117893),
+        end_color=Color(theme=4, tint=-0.249977111117893),
+        fill_type="solid"
+    )
+    ws["B21"].border = Border(
+        left=Side(style="thick", color=Color(theme=1)),
+        right=Side(style="thick", color=Color(theme=1)),
+        top=Side(style="thick", color=Color(theme=1))
+    )
+    ws["B21"].alignment = Alignment(horizontal="center")
+    
+    ws["C21"] = None
+    ws["C21"].font = Font(color=Color(theme=1))
+    ws["C21"].border = Border(top=Side(style="thick", color=Color(theme=1)))
+    
+    ws["D21"] = None
+    ws["D21"].font = Font(color=Color(theme=1))
+    ws["D21"].border = Border(top=Side(style="thick", color=Color(theme=1)))
+    
+    ws["B22"] = "{{ some_value }}"
+    ws["B22"].font = Font(color=Color(theme=1))
+    ws["B22"].border = Border(
+        left=Side(style="thin", color=Color(theme=1)),
+        right=Side(style="thin", color=Color(theme=1)),
+        top=Side(style="thin", color=Color(theme=1)),
+        bottom=Side(style="thin", color=Color(theme=1))
+    )
+    ws["B22"].alignment = Alignment(horizontal="center", vertical="center")
+    
+    ws["C22"] = None
+    ws["C22"].font = Font(color=Color(theme=1))
+    ws["C22"].border = Border(top=Side(style="thin", color=Color(theme=1)))
+    
+    ws["D22"] = None
+    ws["D22"].font = Font(color=Color(theme=1))
+    ws["D22"].border = Border(top=Side(style="thin", color=Color(theme=1)))
+    
+    # Left border column B23-B27
+    for row in range(23, 27):
+        ws[f"B{row}"] = None
+        ws[f"B{row}"].font = Font(color=Color(theme=1))
+        ws[f"B{row}"].border = Border(left=Side(style="thin", color=Color(theme=1)))
+    
+    # Bottom border row 27
+    ws["B27"] = None
+    ws["B27"].font = Font(color=Color(theme=1))
+    ws["B27"].border = Border(
+        left=Side(style="thin", color=Color(theme=1)),
+        bottom=Side(style="thin", color=Color(theme=1))
+    )
+    
+    ws["C27"] = None
+    ws["C27"].font = Font(color=Color(theme=1))
+    ws["C27"].border = Border(bottom=Side(style="thin", color=Color(theme=1)))
+    
+    ws["D27"] = None
+    ws["D27"].font = Font(color=Color(theme=1))
+    ws["D27"].border = Border(bottom=Side(style="thin", color=Color(theme=1)))
+    
+    wb.save(FIXTURES_DIR / "bug-on-insert.xlsx")
+    wb.close()
+    print("  bug-on-insert.xlsx")
+
+
+# ---------------------------------------------------------------------------
 # template_placeholder_outer.xlsx
 # Template for placeholder=true + end_table|insert=above tests.
 # Row 1: headers (Index, Value)
@@ -1263,6 +1444,156 @@ def create_template_combo_two_outer_tables():
     print("  template_combo_two_outer_tables.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_master.xlsx
+# Master template for comprehensive border-preservation regression testing.
+#
+# The layout captures every scenario affected by the non-top-left MergedCell
+# border-data loss bugs fixed in _copy_row_styles and _sync_merges_after_delete.
+#
+# Layout (Sheet1):
+#   Rows  3–10  — Table 1: outer join with {{ insert_data }} + {{ end_table }}
+#   Rows 12–14  — Table 2: outer join, placeholder=True, end_table|insert=above
+#   Rows 17–18  — Styled Section 1: three overlapping merges with thick/thin borders
+#                   B17:C17  horizontal merge  (C17 is non-TL MC)
+#                   D17:D18  vertical merge    (D18 is non-TL MC)
+#                   E17:E18  vertical merge    (E18 is non-TL MC)
+#                   B18, C18 are separate real cells (bottom=thick)
+#   Rows 21–27  — Styled Section 2: wide fill box + multi-row merge with scalar
+#                   B21:H21  single-row wide merge  (C21–H21 are non-TL MCs)
+#                   B22:H27  6-row × 7-col merge   (all non-TL positions are MCs)
+#
+# Reference input for tests:
+#   my_table: DataFrame with index=[1,2,3,'Total',4], colA=[…], colB=[…]
+#   some_value: 'X'
+#
+# Net row shift after both tables expand: +6
+#   Section 1 lands at output rows 23–24
+#   Section 2 lands at output rows 27–33
+# ---------------------------------------------------------------------------
+def create_template_master():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    thin = Side(style="thin")
+    thick = Side(style="thick")
+    yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
+    # --- Table 1 (rows 3–10): outer join with insert_data + end_table ---
+    ws["B3"] = "index"
+    ws["C3"] = "colA"
+    ws["D3"] = "colB"
+
+    ws["B4"] = "a"
+    ws["C4"] = "{{ my_table | table(join=outer) }}"
+    ws["B5"] = "b"
+    ws["B6"] = "c"
+    ws["C7"] = "{{ insert_data }}"
+    ws["B8"] = "d"
+    ws["B8"].font = Font(bold=True)
+    ws["B9"] = "Total"
+    ws["C9"] = "{{ end_table }}"
+    ws["B9"].font = Font(bold=True)
+
+    # --- Table 2 (rows 12–14): outer join / placeholder=True / end_table|insert=above ---
+    ws["B12"] = "index"
+    ws["C12"] = "colA"
+    ws["D12"] = "colB"
+
+    ws["C13"] = "{{ my_table | table(join=outer, placeholder=True, style=first) }}"
+    ws["B14"] = "Total"
+    ws["C14"] = "{{ end_table | insert=above }}"
+    ws["B14"].font = Font(bold=True)
+    for c in range(2, 5):
+        ws.cell(14, c).fill = yellow
+
+    # --- Styled Section 1 (rows 17–18): bordered header band ---
+    # Top-left cells of each merge — borders must survive row-shift
+    ws["B17"] = "headerColumn1"
+    ws["B17"].font = Font(bold=True)
+    ws["B17"].border = Border(left=thick, right=thin, top=thick, bottom=thin)
+    ws["B17"].alignment = Alignment(horizontal="center")
+
+    ws["D17"] = "MergedCol1"
+    ws["D17"].font = Font(bold=True)
+    ws["D17"].border = Border(left=thin, right=thin, top=thick, bottom=thin)
+    ws["D17"].alignment = Alignment(horizontal="center")
+
+    ws["E17"] = "MergedCol2"
+    ws["E17"].font = Font(bold=True)
+    ws["E17"].border = Border(left=thin, right=thick, top=thick, bottom=thin)
+    ws["E17"].alignment = Alignment(horizontal="center")
+
+    # Separate real cells in row 18 (NOT merged — their borders are independent)
+    ws["B18"] = "subheaderColumn1"
+    ws["B18"].font = Font(bold=True)
+    ws["B18"].border = Border(left=thick, right=thin, top=thin, bottom=thick)
+
+    ws["C18"] = "subheaderColumn2"
+    ws["C18"].font = Font(bold=True)
+    ws["C18"].border = Border(left=thin, right=thin, top=thin, bottom=thick)
+
+    # Create section 1 merges — non-TL borders must be set AFTER merge_cells
+    ws.merge_cells("B17:C17")  # C17 → MergedCell
+    ws.merge_cells("D17:D18")  # D18 → MergedCell
+    ws.merge_cells("E17:E18")  # E18 → MergedCell
+
+    # C17: non-TL of B17:C17 — top=thick, bottom=thin, right=thin (no left)
+    ws._cells.get((17, 3)).border = Border(top=thick, bottom=thin, right=thin)
+    # D18: non-TL of D17:D18 — bottom=thin, left=thin, right=thin (no top)
+    ws._cells.get((18, 4)).border = Border(bottom=thin, left=thin, right=thin)
+    # E18: non-TL of E17:E18 — bottom=thin, left=thin, right=thick (no top)
+    ws._cells.get((18, 5)).border = Border(bottom=thin, left=thin, right=thick)
+
+    # --- Styled Section 2 (rows 21–27): wide fill box + multi-row merge ---
+    blue_fill = PatternFill(
+        start_color="4472C4", end_color="4472C4", fill_type="solid"
+    )
+    # B21: top-left of B21:H21 — thick-framed header with fill
+    ws["B21"] = "some text here"
+    ws["B21"].font = Font(bold=True, color="FFFFFF")
+    ws["B21"].fill = blue_fill
+    ws["B21"].border = Border(left=thick, right=thick, top=thick)
+    ws["B21"].alignment = Alignment(horizontal="center")
+
+    # B22: top-left of B22:H27 — contains scalar placeholder, thin border
+    ws["B22"] = "{{ some_value }}"
+    ws["B22"].border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws["B22"].alignment = Alignment(horizontal="center", vertical="center")
+
+    # Create section 2 merges — non-TL borders must be set AFTER merge_cells
+    ws.merge_cells("B21:H21")  # C21–H21 → MergedCells
+    ws.merge_cells("B22:H27")  # all non-(22,2) positions → MergedCells
+
+    # B21:H21 non-TL borders
+    # C21–G21: top=thick only
+    for col in range(3, 8):
+        ws._cells.get((21, col)).border = Border(top=thick)
+    # H21: top=thick, right=thick
+    ws._cells.get((21, 8)).border = Border(top=thick, right=thick)
+
+    # B22:H27 non-TL borders
+    # C22–G22: top=thin only
+    for col in range(3, 8):
+        ws._cells.get((22, col)).border = Border(top=thin)
+    # H22: top=thin, right=thin
+    ws._cells.get((22, 8)).border = Border(top=thin, right=thin)
+    # B23–B26: left=thin only  |  H23–H26: right=thin only
+    for row in range(23, 27):
+        ws._cells.get((row, 2)).border = Border(left=thin)
+        ws._cells.get((row, 8)).border = Border(right=thin)
+    # B27: bottom=thin, left=thin  |  C27–G27: bottom=thin  |  H27: bottom=thin, right=thin
+    ws._cells.get((27, 2)).border = Border(bottom=thin, left=thin)
+    for col in range(3, 8):
+        ws._cells.get((27, col)).border = Border(bottom=thin)
+    ws._cells.get((27, 8)).border = Border(bottom=thin, right=thin)
+
+    wb.save(FIXTURES_DIR / "template_master.xlsx")
+    wb.close()
+    print("  template_master.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -1301,4 +1632,6 @@ if __name__ == "__main__":
     create_template_combo_scalar_with_outer()
     create_template_combo_triple_adjacent_merges()
     create_template_combo_two_outer_tables()
+    create_bug_on_insert()
+    create_template_master()
     print("Done.")
