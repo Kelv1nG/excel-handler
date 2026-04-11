@@ -944,6 +944,39 @@ def create_template_style_src_first():
 
 
 # ---------------------------------------------------------------------------
+# template_empty_outer_style_first.xlsx — empty table with outer+style=first
+# Minimal template: just headers + tag row, no pre-existing data rows,
+# with end_table|insert=above marker.
+# Tests: that style=first works correctly when table is empty (no data rows
+# between tag and end_table).  When data is added, inserted rows should copy
+# style from the tag row (plain), not from end_table row (if styled).
+# ---------------------------------------------------------------------------
+def create_template_empty_outer_style_first():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Index"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    # Plain tag row with outer join + style=first
+    ws["A2"] = None  # Join column placeholder
+    ws["B2"] = "{{ data | table(join=outer, style=first) }}"
+
+    # End marker row with bold + yellow fill (styled)
+    end_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = end_fill
+
+    wb.save(FIXTURES_DIR / "template_empty_outer_style_first.xlsx")
+    wb.close()
+    print("  template_empty_outer_style_first.xlsx")
+
+
+# ---------------------------------------------------------------------------
 # template_combo_outer_merges_below.xlsx
 # Outer join (placeholder=True) with two adjacent same-span merges directly
 # below the table.  Primary regression test for the merge-shift bug.
@@ -1262,6 +1295,7 @@ if __name__ == "__main__":
     create_template_placeholder_outer()
     create_template_style_src_last()
     create_template_style_src_first()
+    create_template_empty_outer_style_first()
     create_template_combo_outer_merges_below()
     create_template_combo_left_with_merges()
     create_template_combo_scalar_with_outer()

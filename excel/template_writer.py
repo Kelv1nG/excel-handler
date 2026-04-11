@@ -344,14 +344,21 @@ def _sync_merges_after_delete(ws: Worksheet, deleted_row: int) -> None:
         )
 
 
-def _copy_row_styles(ws: Worksheet, source_row: int, count: int) -> None:
+def _copy_row_styles(
+    ws: Worksheet, source_row: int, count: int, *, style_from: int | None = None
+) -> None:
     """Insert *count* rows below *source_row*, copying values and styles from it.
-    
+
+    If *style_from* is provided, inserted rows inherit their styles from that row
+    instead of from *source_row*.  The insertion position is always below *source_row*.
+    This decouples the 'where to insert' from the 'which row to style after', which
+    is required for ``style=first`` (insert after last template row but style from tag).
+
     Handles merged cells carefully: snapshots merges and styles before insert_rows(),
     then reconstructs/splits merges that span the insertion point. openpyxl auto-extends
     spanning merges, which is incorrect for data rows — this function prevents that by
     splitting them into top and bottom portions with unmerged insertion space between.
-    
+
     MergedCell proxies are purged from inserted rows to ensure all cells are writable.
     """
     # Snapshot merged ranges before insert — openpyxl's insert_rows() auto-extends
@@ -362,10 +369,11 @@ def _copy_row_styles(ws: Worksheet, source_row: int, count: int) -> None:
         for m in ws.merged_cells.ranges
     ]
 
+    max_col = ws.max_column
+
     # Snapshot source-row styles BEFORE insert_rows() to protect against
     # MergedCell proxy issues: openpyxl may create temporary proxies that later
     # get purged, leaving cells without their original styles. Save now, restore after.
-    max_col = ws.max_column
     saved_styles: dict[int, dict[str, Any]] = {}
     for col in range(1, max_col + 1):
         style_cell = _get_style_source(ws, source_row, col)
@@ -378,6 +386,24 @@ def _copy_row_styles(ws: Worksheet, source_row: int, count: int) -> None:
                 "protection": copy(style_cell.protection),
                 "alignment": copy(style_cell.alignment),
             }
+
+    # Snapshot styles for inserted rows — from style_from if provided, else source_row.
+    insert_styles: dict[int, dict[str, Any]]
+    if style_from is not None:
+        insert_styles = {}
+        for col in range(1, max_col + 1):
+            style_cell = _get_style_source(ws, style_from, col)
+            if style_cell.has_style:
+                insert_styles[col] = {
+                    "font": copy(style_cell.font),
+                    "border": copy(style_cell.border),
+                    "fill": copy(style_cell.fill),
+                    "number_format": style_cell.number_format,
+                    "protection": copy(style_cell.protection),
+                    "alignment": copy(style_cell.alignment),
+                }
+    else:
+        insert_styles = saved_styles
 
     # Snapshot values from merged cells BELOW source_row before insert_rows().
     # After shifting, the top-left Cell of a merge may be replaced by a MergedCell
@@ -518,7 +544,7 @@ def _copy_row_styles(ws: Worksheet, source_row: int, count: int) -> None:
             val_src = ws.cell(source_row, col)
             dst = ws.cell(source_row + offset, col)
             dst.value = val_src.value
-            style = saved_styles.get(col)
+            style = insert_styles.get(col)
             if style:
                 dst.font = copy(style["font"])
                 dst.border = copy(style["border"])
@@ -972,21 +998,27 @@ def _fill_table(ws: Worksheet, mc: MarkedCell, df: pl.DataFrame) -> None:
                     rows_inserted = len(extra)
                     if insert_before_row is not None:
                         # Option C: insert extras BEFORE the insert_before_row.
-                        # Use the row above as the style source (unless style=first).
+                        # Always insert just above the marker row; style=first copies
+                        # styles from tag_row instead of from the row immediately
+                        # above the marker.
+                        insert_after = insert_before_row - 1
+                        if insert_after < tag_row:
+                            insert_after = tag_row
                         if tm.style == "first":
-                            style_src = tag_row
+                            _copy_row_styles(ws, insert_after, rows_inserted, style_from=tag_row)
                         else:
-                            style_src = insert_before_row - 1
-                            if style_src < tag_row:
-                                style_src = tag_row
-                        _copy_row_styles(ws, style_src, rows_inserted)
-                        # Rows were inserted after style_src, so
+                            _copy_row_styles(ws, insert_after, rows_inserted)
+                        # Rows were inserted after insert_after, so
                         # insert_before_row (and everything below) shifted down.
                         insert_before_row += rows_inserted
                         last_tmpl_row += rows_inserted
                     else:
-                        style_src = tag_row if tm.style == "first" else last_tmpl_row
-                        _copy_row_styles(ws, style_src, rows_inserted)
+                        # Always insert after last_tmpl_row; style=first copies styles
+                        # from tag_row instead of from last_tmpl_row.
+                        if tm.style == "first":
+                            _copy_row_styles(ws, last_tmpl_row, rows_inserted, style_from=tag_row)
+                        else:
+                            _copy_row_styles(ws, last_tmpl_row, rows_inserted)
 
             # After row insertion, saved_join keys may no longer match worksheet
             # row numbers.  Rebuild the mapping: original template rows that were

@@ -1483,11 +1483,7 @@ class TestStyleSrcMode:
     def test_style_first_inserted_rows_not_bold(
         self, template_style_src_first_path, tmp_path
     ):
-        """style=first: inserted rows copy from plain tag row — must NOT be bold.
-        
-        NOTE: This test is a known pre-existing failure (not a regression).
-        Tracked separately; do not be alarmed if it fails.
-        """
+        """style=first: inserted rows copy from plain tag row — must NOT be bold."""
         wb = self._run(template_style_src_first_path, tmp_path)
         ws = wb.active
         assert ws.cell(4, 1).font.bold is not True, (
@@ -1500,11 +1496,7 @@ class TestStyleSrcMode:
     def test_style_first_inserted_rows_no_solid_fill(
         self, template_style_src_first_path, tmp_path
     ):
-        """style=first: inserted rows copy plain tag row — must NOT have solid fill.
-        
-        NOTE: This test is a known pre-existing failure (not a regression).
-        Tracked separately; do not be alarmed if it fails.
-        """
+        """style=first: inserted rows copy plain tag row — must NOT have solid fill."""
         wb = self._run(template_style_src_first_path, tmp_path)
         ws = wb.active
         assert ws.cell(4, 1).fill.fill_type != "solid", (
