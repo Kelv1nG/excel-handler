@@ -2,128 +2,249 @@ from __future__ import annotations
 
 import re
 from copy import copy
+from dataclasses import dataclass
 from os import PathLike
-
-from openpyxl.cell.cell import MergedCell as _MC
-from openpyxl.utils import coordinate_to_tuple
-
-from typing import Any
+from typing import Any, Literal, cast
 
 import polars as pl
+from openpyxl.cell.cell import MergedCell as _MC
+from openpyxl.utils import coordinate_to_tuple
+from openpyxl.workbook import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
+from excel._utils import load_excel_workbook
 from excel.protocols import TypedValue
 from excel.template_reader import ExcelTemplateReader, MarkedCell
-from excel._utils import load_excel_workbook
-
-_END_TABLE_RE = re.compile(r"\{\{\s*end_table\s*(?:\|\s*(?P<meta>[^}]*))?\}\}")
-_INSERT_DATA_RE = re.compile(r"\{\{\s*insert_data\s*\}\}")
-
-# Extracts the raw fill spec from the metadata string without relying on the
-# comma-split parser.  Matches "fill=..." stopping before the next key= or
-# closing paren, e.g. "fill=0" or "fill=colA:0;colB:N/A".
-_FILL_SPEC_RE = re.compile(r"\bfill=([^,)]+)")
-
-_FILL_MISSING = object()  # sentinel for _apply_fill
-
-
-def _coerce_fill(v: str) -> Any:
-    """Coerce a fill value string to its most specific Python type."""
-    if v.lower() == "true":
-        return True
-    if v.lower() == "false":
-        return False
-    try:
-        return int(v)
-    except ValueError:
-        pass
-    try:
-        return float(v)
-    except ValueError:
-        pass
-    return v
+from excel._types import (
+    JoinMode,
+    InsertMode,
+    StyleSource,
+    OrderBy,
+    FillSpec,
+    TableMeta,
+    _EndTableMarker,
+    _apply_fill,
+    _is_loop,
+    _is_table,
+    _FILL_MISSING,
+    _VALID_JOIN_MODES,
+    _VALID_STYLE_SOURCES,
+    _TemplateRegex,
+)
 
 
-def _parse_fill_spec(mc: MarkedCell) -> dict[str | None, Any] | None:
-    """Return a fill spec dict from a ``fill=`` metadata parameter, or *None*.
+class ExcelTemplateWriter:
+    """Fill an Excel template with data and write the output file.
 
-    Two forms:
+    Template syntax:
 
-    * ``fill=0``                 — global: ``{None: 0}``
-    * ``fill=colA:0;colB:N/A``  — per-column: ``{"colA": 0, "colB": "N/A"}``
+    * ``{{ variable }}`` — scalar placeholder; replaced with a single value.
+    * ``{{ variable | loop() }}`` — loop row tag; marks cells for row expansion.
+      All loop-tagged cells in the same row must reference list variables of the
+      same length.  The template row is duplicated N times (one per list element).
+    * ``{{ variable | table(...) }}`` — table tag; fills a structured data region.
 
-    Per-column pairs use ``:`` as the col:value separator and ``;`` to
-    separate pairs (commas are reserved by the outer metadata parser).
-    """
-    m = _FILL_SPEC_RE.search(mc.metadata)
-    if m is None:
-        return None
-    raw = m.group(1).strip()
-    if ":" not in raw:
-        return {None: _coerce_fill(raw)}
-    result: dict[str | None, Any] = {}
-    for part in raw.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        col, _, val = part.partition(":")
-        result[col.strip()] = _coerce_fill(val.strip())
-    return result
+      Table parameters:
 
+      - ``join=[left|inner|outer|right]`` — join strategy (default ``left``).
+      - ``on=ColName`` — override the join column (default: inferred from the header
+        to the left of the tag cell).
+      - ``order_by=[asc|desc|ColName[:asc|:desc]]`` — sort the outer-join upper zone
+        by column (``outer`` only).
+      - ``fill=[value|col1:<v1>;col2:<v2>]`` — fill ``None`` values globally or
+        per-column.
+      - ``positional=True`` — fill by position, no join column or header matching.
+      - ``placeholder=true`` — tag row is used as a style source for inserted rows,
+        then deleted from the output if its join value is absent from the DataFrame.
+        Applies to ``join=outer`` only.
+      - ``style=first|last`` (default ``last``) — which template row to copy styles
+        from when inserting new rows.  ``first`` uses the tag row; ``last`` uses the
+        last template row.
 
-def _apply_fill(value: Any, col_name: str, fill_spec: dict[str | None, Any] | None) -> Any:
-    """Return *value*, or a fill substitute when *value* is *None* and fill is configured.
+    * ``{{ end_table }}`` — marks the table boundary; inserted rows go after.
+    * ``{{ end_table | insert=above }}`` — marks the table boundary; inserted rows
+      go before this row.
+    * ``{{ insert_data }}`` — marks the insertion point for outer-join extras.
 
-    Lookup order: per-column value → global value → ``None`` (no fill).
-    """
-    if value is not None or fill_spec is None:
-        return value
-    v = fill_spec.get(col_name, _FILL_MISSING)
-    if v is not _FILL_MISSING:
-        return v
-    return fill_spec.get(None)  # global fallback; None if absent
+    Record access (scalar only):
 
+    * ``{{ record_var.column_name }}`` — extract a single cell from a 1-row DataFrame.
 
-def _is_loop(cell: MarkedCell) -> bool:
-    """Return ``True`` if *cell* carries a ``loop()`` metadata tag."""
-    return cell.parse_metadata().get("type") == "loop"
+    Usage::
 
-
-def _is_table(cell: MarkedCell) -> bool:
-    """Return ``True`` if *cell* carries a ``table()`` metadata tag."""
-    return cell.parse_metadata().get("type") == "table"
-
-
-def _parse_table_meta(cell: MarkedCell) -> tuple[str, str | None, bool, bool, str]:
-    """Return (join_mode, on_col_override_or_None, positional, placeholder, style_src_mode).
-
-    *positional* is True when ``table(positional=True)`` is used — rows/columns
-    are written by position with no join column or header matching.
-    Default join mode is 'left'.
-
-    *placeholder* is True when ``table(placeholder=true)`` is used — the tag row
-    is used as the style source for inserted rows, then deleted from the output if
-    its join value is not present in the DataFrame.  No-op for ``join=right``.
-
-    *style_src_mode* is ``"first"`` or ``"last"`` (default).  Controls which
-    template row is used as the style source when new rows are inserted:
-    - ``"first"`` — copies style from ``tag_row`` (always a plain data row).
-    - ``"last"`` — copies style from ``last_tmpl_row`` (current/default behaviour).
-    """
-    meta = cell.parse_metadata()
-    positional = bool(meta.get("positional", False))
-    join_mode = str(meta.get("join", "left"))
-    on_col = str(meta["on"]) if "on" in meta else None
-    placeholder = bool(meta.get("placeholder", False))
-    style_src_mode = str(meta.get("style", "last"))
-    if style_src_mode not in ("first", "last"):
-        raise ValueError(
-            f"Invalid style={style_src_mode!r} in tag {cell.raw!r}. "
-            "Expected 'first' or 'last'."
+        writer = ExcelTemplateWriter("template.xlsx")
+        writer.write(
+            {
+                "title": TypedValue("Q1 Report", "single"),
+                "month": TypedValue(["Jan", "Feb", "Mar"], "list"),
+                "sales": TypedValue(sales_df, "table"),
+            },
+            "output.xlsx",
         )
-    return join_mode, on_col, positional, placeholder, style_src_mode
+    """
+
+    def __init__(self, template: str | PathLike[str] | bytes):
+        self._template = template
+
+    def write(self, vars: dict[str, TypedValue], file: str | PathLike[str]) -> None:
+        """Fill the template and save to *file*.
+
+        Args:
+            vars: Variable name → TypedValue.
+            file: Output path for the filled workbook.
+
+        Raises:
+            KeyError: A template tag references a variable not present in *vars*.
+            ValueError: Loop cells in the same row have lists of different lengths.
+        """
+        wb = load_excel_workbook(self._template)
+        structure = ExcelTemplateReader().read(self._template)
+
+        loop_rows, tables, scalars = self._categorize_template_cells(structure)
+        self._fill_scalar_cells(wb, scalars, vars)
+        self._fill_loop_rows(wb, loop_rows, vars)
+        self._check_table_collisions(wb, tables, vars)
+        self._fill_table_cells(wb, tables, vars)
+
+        wb.save(file)
+
+    def _categorize_template_cells(
+        self, structure: dict[str, list[MarkedCell]]
+    ) -> tuple[
+        dict[tuple[str, int], list[MarkedCell]],
+        list[MarkedCell],
+        list[MarkedCell],
+    ]:
+        """Split tagged cells into loop participants, tables, and scalars.
+        
+        Returns:
+            (loop_rows, tables, scalars) where loop_rows is keyed by (sheet_name, row_number).
+        """
+        loop_rows: dict[tuple[str, int], list[MarkedCell]] = {}
+        tables: list[MarkedCell] = []
+        scalars: list[MarkedCell] = []
+
+        for sheet_name, cells in structure.items():
+            for cell in cells:
+                if cell.name in ("end_table", "insert_data"):
+                    continue  # structural marker, not a variable
+                if _is_table(cell):
+                    tables.append(cell)
+                elif _is_loop(cell):
+                    row_n = coordinate_to_tuple(cell.cell_addr)[0]
+                    loop_rows.setdefault((sheet_name, row_n), []).append(cell)
+                else:
+                    scalars.append(cell)
+
+        return loop_rows, tables, scalars
+
+    def _fill_scalar_cells(
+        self, wb: Workbook, scalars: list[MarkedCell], vars: dict[str, TypedValue]
+    ) -> None:
+        """Write scalar cells to the worksheet.
+        
+        Scalars are written FIRST—before any row insertions from loop or table
+        processing. openpyxl shifts all cells below an insert_rows() call, so values
+        already written here will ride along to their correct final positions.
+        """
+        for mc in scalars:
+            ws = wb[mc.sheet]
+            row_n, col_n = coordinate_to_tuple(mc.cell_addr)
+            if "." in mc.name:
+                var_name, col_name = mc.name.split(".", 1)
+                tv = vars[var_name]
+                if tv.value.height != 1:
+                    raise ValueError(
+                        f"Record variable '{var_name}' has {tv.value.height} rows;"
+                        " expected exactly 1"
+                    )
+                ws.cell(row_n, col_n).value = tv.value[col_name][0]
+            else:
+                ws.cell(row_n, col_n).value = vars[mc.name].value
+
+    def _fill_loop_rows(
+        self,
+        wb: Workbook,
+        loop_rows: dict[tuple[str, int], list[MarkedCell]],
+        vars: dict[str, TypedValue],
+    ) -> None:
+        """Expand and duplicate loop rows based on list variable lengths.
+        
+        Processes each sheet's rows bottom-up so row inserts don't invalidate
+        later row indices within the same sheet.
+        """
+        by_sheet: dict[str, list[tuple[int, list[MarkedCell]]]] = {}
+        for (sheet_name, row_n), cells in loop_rows.items():
+            by_sheet.setdefault(sheet_name, []).append((row_n, cells))
+
+        for sheet_name, rows in by_sheet.items():
+            ws = wb[sheet_name]
+            for row_n, cells in sorted(rows, key=lambda x: x[0], reverse=True):
+                n = len(vars[cells[0].name].value)
+
+                for mc in cells[1:]:
+                    actual = len(vars[mc.name].value)
+                    if actual != n:
+                        raise ValueError(
+                            f"Loop variables in row {row_n} of '{sheet_name}' have "
+                            f"different lengths: '{cells[0].name}'={n}, "
+                            f"'{mc.name}'={actual}"
+                        )
+
+                if n == 0:
+                    ws.delete_rows(row_n)
+                    continue
+
+                if n > 1:
+                    _copy_row_styles(ws, row_n, n - 1)
+
+                for i in range(n):
+                    for mc in cells:
+                        _, col_n = coordinate_to_tuple(mc.cell_addr)
+                        ws.cell(row_n + i, col_n).value = vars[mc.name].value[i]
+
+    def _check_table_collisions(
+        self, wb: Workbook, tables: list[MarkedCell], vars: dict[str, TypedValue]
+    ) -> None:
+        """Validate that no two table operations on the same sheet overlap."""
+        regions_by_sheet: dict[str, list[tuple[str, tuple[int, int, int, int]]]] = {}
+        for mc in tables:
+            ws = wb[mc.sheet]
+            df = vars[mc.name].value
+            region = _compute_table_region(ws, mc, df)
+            regions_by_sheet.setdefault(mc.sheet, []).append((f"table({mc.name})", region))
+        for sheet_name, regions in regions_by_sheet.items():
+            _check_region_collisions(regions)
+
+    def _fill_table_cells(
+        self, wb: Workbook, tables: list[MarkedCell], vars: dict[str, TypedValue]
+    ) -> None:
+        """Fill all table regions with data.
+        
+        Processes tables bottom-up per sheet so outer row insertions don't corrupt
+        later table positions in the same sheet.
+        """
+        tables_by_sheet: dict[str, list[MarkedCell]] = {}
+        for mc in tables:
+            tables_by_sheet.setdefault(mc.sheet, []).append(mc)
+
+        for sheet_name, mcs in tables_by_sheet.items():
+            ws = wb[sheet_name]
+            for mc in sorted(
+                mcs, key=lambda c: coordinate_to_tuple(c.cell_addr)[0], reverse=True
+            ):
+                tm = TableMeta.from_cell(mc)
+                if tm.positional:
+                    _fill_positional(ws, mc, vars[mc.name].value)
+                else:
+                    _fill_table(ws, mc, vars[mc.name].value)
 
 
-def _get_style_source(ws, row: int, col: int):
+
+# ── 1. openpyxl cell and merge helpers ─────────────────────────────────────
+
+
+def _get_style_source(ws: Worksheet, row: int, col: int):
     """Return the cell that owns the style for *(row, col)*.
 
     Inside a merged range only the top-left cell carries style data;
@@ -139,7 +260,7 @@ def _get_style_source(ws, row: int, col: int):
     return cell
 
 
-def _get_merged_cell_value(ws, row: int, col: int) -> Any:
+def _get_merged_cell_value(ws: Worksheet, row: int, col: int) -> Any:
     """Return the effective value of a cell, resolving merged ranges.
 
     In normal (non-read-only) mode openpyxl returns ``None`` for every cell
@@ -156,7 +277,7 @@ def _get_merged_cell_value(ws, row: int, col: int) -> Any:
     return None
 
 
-def _safe_remove_merge(ws, merge_range) -> None:
+def _safe_remove_merge(ws: Worksheet, merge_range: Any) -> None:
     """Remove a merged range from the registry without crashing on missing cells.
 
     openpyxl's ws.unmerge_cells() deletes all cell objects inside the range
@@ -174,7 +295,7 @@ def _safe_remove_merge(ws, merge_range) -> None:
                 del ws._cells[(r, c)]
 
 
-def _sync_merges_after_delete(ws, deleted_row: int) -> None:
+def _sync_merges_after_delete(ws: Worksheet, deleted_row: int) -> None:
     """Correct the merged-cells registry after ``delete_rows()``.
 
     openpyxl 3.x shifts cell *data* when rows are deleted but does **not**
@@ -223,7 +344,7 @@ def _sync_merges_after_delete(ws, deleted_row: int) -> None:
         )
 
 
-def _copy_row_styles(ws, source_row: int, count: int) -> None:
+def _copy_row_styles(ws: Worksheet, source_row: int, count: int) -> None:
     """Insert *count* rows below *source_row*, copying values and styles from it.
     
     Handles merged cells carefully: snapshots merges and styles before insert_rows(),
@@ -404,13 +525,14 @@ def _copy_row_styles(ws, source_row: int, count: int) -> None:
                 dst.fill = copy(style["fill"])
                 dst.number_format = style["number_format"]
                 dst.protection = copy(style["protection"])
-                dst.alignment = copy(style["alignment"])
 
 
-def _read_headers(ws, header_row: int, start_col: int) -> list[tuple[str, int]]:
-    """Read non-empty header names rightward from start_col.
+# ── 2. Table boundary scanning ─────────────────────────────────────────────
 
-    Returns list of (column_name, col_index) pairs.
+def _read_headers(ws: Worksheet, header_row: int, start_col: int) -> list[tuple[str, int]]:
+    """Read non-empty header names rightward from *start_col*.
+
+    Returns a list of ``(column_name, col_index)`` pairs.
     """
     headers: list[tuple[str, int]] = []
     col = start_col
@@ -423,7 +545,7 @@ def _read_headers(ws, header_row: int, start_col: int) -> list[tuple[str, int]]:
     return headers
 
 
-def _find_last_data_row(ws, start_row: int, join_col: int) -> int:
+def _find_last_data_row(ws: Worksheet, start_row: int, join_col: int) -> int:
     """Return the last row in join_col with a non-empty value, starting from start_row.
 
     Stops before a multi-row vertical merge in the join column: such merges
@@ -455,12 +577,11 @@ def _find_last_data_row(ws, start_row: int, join_col: int) -> int:
     return last_row
 
 
-def _find_end_table_row(ws, start_row: int) -> tuple[int, int, str] | None:
+def _find_end_table_row(ws: Worksheet, start_row: int) -> _EndTableMarker | None:
     """Scan rows from *start_row* downward for a ``{{ end_table }}`` marker.
 
-    Returns ``(row, col, insert_mode)`` of the marker cell, or ``None`` if
-    not found.  *insert_mode* is ``"below"`` (default) or ``"above"``.
-    Stops at the first fully-blank row (all columns empty).
+    Returns an :class:`_EndTableMarker` describing the marker cell, or ``None``
+    if not found.  Stops at the first fully-blank row (all columns empty).
     """
     max_col = ws.max_column or 1
     row = start_row
@@ -471,23 +592,23 @@ def _find_end_table_row(ws, start_row: int) -> tuple[int, int, str] | None:
             if val is not None and str(val).strip():
                 all_empty = False
                 if isinstance(val, str):
-                    m = _END_TABLE_RE.search(val)
+                    m = _TemplateRegex.END_TABLE.search(val)
                     if m:
-                        insert_mode = "below"
+                        insert_mode: InsertMode = "below"
                         meta = (m.group("meta") or "").strip()
                         if meta:
                             for part in meta.split(","):
                                 k, _, v = part.partition("=")
                                 if k.strip().lower() == "insert":
-                                    insert_mode = v.strip().lower()
-                        return (row, col, insert_mode)
+                                    insert_mode = cast(InsertMode, v.strip().lower())
+                        return _EndTableMarker(row=row, col=col, insert_mode=insert_mode)
         if all_empty:
             break
         row += 1
     return None
 
 
-def _find_insert_data_row(ws, start_row: int) -> tuple[int, int] | None:
+def _find_insert_data_row(ws: Worksheet, start_row: int) -> tuple[int, int] | None:
     """Scan rows from *start_row* downward for a ``{{ insert_data }}`` marker.
 
     Returns ``(row, col)`` of the marker cell, or ``None`` if not found.
@@ -501,7 +622,7 @@ def _find_insert_data_row(ws, start_row: int) -> tuple[int, int] | None:
             val = ws.cell(row, col).value
             if val is not None and str(val).strip():
                 all_empty = False
-                if isinstance(val, str) and _INSERT_DATA_RE.search(val):
+                if isinstance(val, str) and _TemplateRegex.INSERT_DATA.search(val):
                     return (row, col)
         if all_empty:
             break
@@ -510,7 +631,7 @@ def _find_insert_data_row(ws, start_row: int) -> tuple[int, int] | None:
 
 
 def _compute_table_region(
-    ws, mc: MarkedCell, df: pl.DataFrame
+    ws: Worksheet, mc: MarkedCell, df: pl.DataFrame
 ) -> tuple[int, int, int, int]:
     """Return (min_row, min_col, max_row, max_col) of the region a table() tag would write.
 
@@ -518,8 +639,8 @@ def _compute_table_region(
     Column span is join_col through the last header column.
     For ``positional=True`` tables, the region is tag_cell to tag_cell + df shape.
     """
-    join_mode, _, positional, _, _ = _parse_table_meta(mc)
-    if positional:
+    tm = TableMeta.from_cell(mc)
+    if tm.positional:
         start_row, start_col = coordinate_to_tuple(mc.cell_addr)
         return start_row, start_col, start_row + df.height - 1, start_col + df.width - 1
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
@@ -560,7 +681,9 @@ def _check_region_collisions(
                 )
 
 
-def _fill_positional(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
+# ── 3. Table fill algorithms ───────────────────────────────────────────────
+
+def _fill_positional(ws: Worksheet, mc: MarkedCell, df: pl.DataFrame) -> None:
     """Fill a DataFrame positionally starting at the tag cell.
 
     The tag cell is the top-left corner of the written region.
@@ -587,35 +710,8 @@ def _fill_positional(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             ws.cell(start_row + r_offset, start_col + c_offset).value = row[col_name]
 
 
-def _parse_order_by(cell: MarkedCell) -> tuple[str | None, bool] | None:
-    """Return *(sort_col, ascending)* from an ``order_by`` metadata key, or ``None``.
-
-    Supported forms (only applied when ``join=outer``):
-
-    - ``order_by=asc`` / ``order_by=desc``   → sort by the join column
-    - ``order_by=ColName``                    → sort by *ColName*, ascending
-    - ``order_by=ColName:asc``               → sort by *ColName*, ascending
-    - ``order_by=ColName:desc``              → sort by *ColName*, descending
-
-    Returns ``None`` when no ``order_by`` key is present.
-    *sort_col* is ``None`` when the join column should be used.
-    """
-    order_by = cell.parse_metadata().get("order_by")
-    if order_by is None:
-        return None
-    v = str(order_by).strip()
-    if v.lower() == "asc":
-        return (None, True)
-    if v.lower() == "desc":
-        return (None, False)
-    if ":" in v:
-        col, _, direction = v.partition(":")
-        return (col.strip() or None, direction.strip().lower() != "desc")
-    return (v or None, True)
-
-
 def _sorted_outer_fill(
-    ws,
+    ws: Worksheet,
     df: pl.DataFrame,
     tag_row: int,
     join_tmpl_col: int,
@@ -624,8 +720,8 @@ def _sorted_outer_fill(
     saved_join: dict[int, Any],
     last_tmpl_row: int,
     insert_before_row: int | None,
-    order_by: tuple[str | None, bool],
-    fill_spec: dict[str | None, Any] | None = None,
+    order_by: OrderBy,
+    fill: FillSpec | None = None,
 ) -> int:
     """Write a sorted outer join into the upper zone of a table region.
 
@@ -638,9 +734,8 @@ def _sorted_outer_fill(
 
     Returns the number of rows inserted into the worksheet.
     """
-    sort_col, sort_asc = order_by
-    if sort_col is None:
-        sort_col = join_df_col
+    sort_col = order_by.col if order_by.col is not None else join_df_col
+    sort_asc = order_by.ascending
 
     # Lower zone: join values of all rows at/below insert_before_row.
     # These are key-matched separately and excluded from the sorted upper zone.
@@ -699,7 +794,7 @@ def _sorted_outer_fill(
         ws_row = tag_row + i
         ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
         for col_name, col_idx in headers:
-            ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
+            ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill)
 
     # Clear leftover upper zone slots when fewer items than slots.
     for r in range(tag_row + n_upper_items, upper_last_row + 1):
@@ -720,51 +815,43 @@ def _sorted_outer_fill(
             if tmpl_val in df_lookup:
                 row = df_lookup[tmpl_val]
                 for col_name, col_idx in headers:
-                    ws.cell(new_r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
-            elif fill_spec is not None:
+                    ws.cell(new_r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill)
+            elif fill is not None:
                 # Unmatched lower zone row — apply fill to existing cell values.
                 for col_name, col_idx in headers:
                     current = ws.cell(new_r, col_idx).value
-                    ws.cell(new_r, col_idx).value = _apply_fill(current, col_name, fill_spec)
+                    ws.cell(new_r, col_idx).value = _apply_fill(current, col_name, fill)
 
     return rows_inserted
 
 
-def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
-    """Fill ws with df data using join semantics described in mc.metadata.
+def _fill_table(ws: Worksheet, mc: MarkedCell, df: pl.DataFrame) -> None:
+    """Fill *ws* with *df* data using the join semantics declared in *mc*.
 
-    Join modes and output strategy:
-    - left:  fill matched rows; leave unmatched template rows blank. No inserts.
-    - inner: fill matched rows; clear data cols on unmatched template rows. No inserts.
-    - outer: fill matched rows; append unmatched DF rows at bottom (pushes content down).
-           With order_by: uses _sorted_outer_fill to sort upper zone by declared column.
-    - right: overwrite template rows top-down in DF order; insert if DF is longer;
-             clear remaining template rows if DF is shorter.
-    
+    Join modes:
+
+    * ``left``  — fill matched rows; leave unmatched template rows as-is.  No inserts.
+    * ``inner`` — fill matched rows; clear data columns on unmatched rows.  No inserts.
+    * ``outer`` — fill matched rows; append unmatched DataFrame rows (pushes content down).
+      With ``order_by``: uses :func:`_sorted_outer_fill` to sort the upper zone.
+    * ``right`` — overwrite rows top-down in DataFrame order; insert if DataFrame is longer;
+      clear remaining template rows if DataFrame is shorter.
+
     Structural markers (optional):
-    - {{ end_table }}: on own row (no join value) → table ends at row above.
-    - {{ end_table }} (on data row): marker cell cleared; that row is last table row.
-    - {{ end_table | insert=above }} (on data row): extras inserted BEFORE this row.
-    - {{ insert_data }}: marks insertion point for outer join extras; takes precedence
-      over {{ end_table }} for insertion placement (boundary remains unchanged).
-    
-    Fill parameter (optional, metadata-based):
-    - fill=<value>: globally replace None with <value> in all data columns.
-    - fill=col1:<v1>;col2:<v2>: per-column fill values.
-    
-    Order by parameter (optional, outer join only):
-    - order_by=asc/desc: sort upper zone by join column ascending/descending.
-    - order_by=ColName[:asc|:desc]: sort by named column (default asc).
+
+    * ``{{ end_table }}`` on its own row:  table ends at the row above; marker row deleted.
+    * ``{{ end_table }}`` on a data row:   marker cell cleared; that row is the last data row.
+    * ``{{ end_table | insert=above }}`` on a data row:  as above, but extras inserted before it.
+    * ``{{ insert_data }}`` — marks the insertion point for outer-join extras; takes precedence
+      over ``{{ end_table }}`` for insertion placement.
     """
-    join_mode, on_col, _, placeholder, style_src_mode = _parse_table_meta(mc)
-    order_by = _parse_order_by(mc)
-    fill_spec = _parse_fill_spec(mc)
+    tm = TableMeta.from_cell(mc)
     tag_row, tag_col = coordinate_to_tuple(mc.cell_addr)
     header_row = tag_row - 1
     join_tmpl_col = tag_col - 1
 
     tmpl_join_header = _get_merged_cell_value(ws, header_row, join_tmpl_col)
-    join_df_col: str = on_col if on_col is not None else str(tmpl_join_header)
+    join_df_col: str = tm.on if tm.on is not None else str(tmpl_join_header)
 
     headers = _read_headers(ws, header_row, tag_col)
     # Handle {{ insert_data }} marker — delete its row early so the boundary
@@ -798,23 +885,22 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     insert_before_row: int | None = None  # Option C: extras go before this row
 
     if end_marker is not None:
-        end_row, end_col, insert_mode = end_marker
-        end_join_val = _get_merged_cell_value(ws, end_row, join_tmpl_col)
+        end_join_val = _get_merged_cell_value(ws, end_marker.row, join_tmpl_col)
         if end_join_val is not None and str(end_join_val).strip():
             # Data row with {{ end_table }}.  Clear the marker cell.
-            ws.cell(end_row, end_col).value = None
-            if insert_mode == "above":
+            ws.cell(end_marker.row, end_marker.col).value = None
+            if end_marker.insert_mode == "above":
                 # Option C: match all rows through end_row, but insert
                 # extras above end_row (between the data rows and this row).
-                last_tmpl_row = end_row
-                insert_before_row = end_row
+                last_tmpl_row = end_marker.row
+                insert_before_row = end_marker.row
             else:
                 # Option B: extras go after last_tmpl_row (default).
-                last_tmpl_row = end_row
+                last_tmpl_row = end_marker.row
         else:
             # Option A: {{ end_table }} on its own row.
-            last_tmpl_row = end_row - 1
-            delete_end_row = end_row
+            last_tmpl_row = end_marker.row - 1
+            delete_end_row = end_marker.row
     else:
         last_tmpl_row = _find_last_data_row(ws, tag_row, join_tmpl_col)
 
@@ -831,19 +917,19 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     # can overwrite (tag_row, tag_col) with the correct value.
     ws.cell(tag_row, tag_col).value = None
 
-    if join_mode == "right":
+    if tm.join == "right":
         df_list = df.to_dicts()
         n_df = len(df_list)
         if n_df > n_tmpl:
             rows_inserted = n_df - n_tmpl
-            style_src = tag_row if style_src_mode == "first" else last_tmpl_row
+            style_src = tag_row if tm.style == "first" else last_tmpl_row
             _copy_row_styles(ws, style_src, rows_inserted)
         for i, row in enumerate(df_list):
             ws_row = tag_row + i
             ws.cell(ws_row, join_tmpl_col).value = row.get(join_df_col)
             for col_name, col_idx in headers:
-                ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
-        # Clear extra template rows if DF has fewer rows
+                ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, tm.fill)
+        # Clear extra template rows if DataFrame has fewer rows.
         for r in range(tag_row + n_df, last_tmpl_row + 1):
             ws.cell(r, join_tmpl_col).value = None
             for _, col_idx in headers:
@@ -863,10 +949,11 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
 
         # Sorted outer join: write all upper-zone rows in declared sort order.
         # This path replaces the standard outer join logic below.
-        if join_mode == "outer" and order_by is not None:
+        if tm.join == "outer" and tm.order_by is not None:
             rows_inserted = _sorted_outer_fill(
                 ws, df, tag_row, join_tmpl_col, join_df_col,
-                headers, saved_join, last_tmpl_row, insert_before_row, order_by, fill_spec,
+                headers, saved_join, last_tmpl_row, insert_before_row,
+                tm.order_by, tm.fill,
             )
         else:
             # outer: insert extra rows BEFORE writing any data.  insert_rows()
@@ -874,7 +961,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
             # destroying values already written there.  By inserting first and
             # writing matched rows afterwards, all cells are real Cell objects.
             extra: list[dict[str, Any]] = []
-            if join_mode == "outer":
+            if tm.join == "outer":
                 tmpl_vals = set(saved_join.values())
                 extra = [
                     row
@@ -886,7 +973,7 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     if insert_before_row is not None:
                         # Option C: insert extras BEFORE the insert_before_row.
                         # Use the row above as the style source (unless style=first).
-                        if style_src_mode == "first":
+                        if tm.style == "first":
                             style_src = tag_row
                         else:
                             style_src = insert_before_row - 1
@@ -898,14 +985,13 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                         insert_before_row += rows_inserted
                         last_tmpl_row += rows_inserted
                     else:
-                        style_src = tag_row if style_src_mode == "first" else last_tmpl_row
+                        style_src = tag_row if tm.style == "first" else last_tmpl_row
                         _copy_row_styles(ws, style_src, rows_inserted)
 
             # After row insertion, saved_join keys may no longer match worksheet
             # row numbers.  Rebuild the mapping: original template rows that were
             # at or above the insertion point keep their row number; rows at or
-            # below insert_before_row (Option C) have shifted down by
-            # rows_inserted.
+            # below insert_before_row (Option C) have shifted down by rows_inserted.
             if rows_inserted and insert_before_row is not None:
                 shifted_join: dict[int, Any] = {}
                 orig_insert_row = insert_before_row - rows_inserted
@@ -925,19 +1011,19 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                 if tmpl_val in df_lookup:
                     row = df_lookup[tmpl_val]
                     for col_name, col_idx in headers:
-                        ws.cell(r, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
-                elif join_mode == "inner":
+                        ws.cell(r, col_idx).value = _apply_fill(row.get(col_name), col_name, tm.fill)
+                elif tm.join == "inner":
                     for _, col_idx in headers:
                         ws.cell(r, col_idx).value = None
 
             # Apply fill to unmatched template rows in left/outer joins.
-            if fill_spec is not None and join_mode in ("left", "outer"):
+            if tm.fill is not None and tm.join in ("left", "outer"):
                 for r in sorted(saved_join):
                     tmpl_val = saved_join[r]
                     if tmpl_val not in df_lookup:
                         for col_name, col_idx in headers:
                             current = ws.cell(r, col_idx).value
-                            ws.cell(r, col_idx).value = _apply_fill(current, col_name, fill_spec)
+                            ws.cell(r, col_idx).value = _apply_fill(current, col_name, tm.fill)
 
             if extra:
                 if insert_before_row is not None:
@@ -949,13 +1035,12 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
                     ws_row = extra_start + i
                     ws.cell(ws_row, join_tmpl_col).value = row[join_df_col]
                     for col_name, col_idx in headers:
-                        ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, fill_spec)
+                        ws.cell(ws_row, col_idx).value = _apply_fill(row.get(col_name), col_name, tm.fill)
 
     # Delete the {{ end_table }} marker row (Option A).  Row indices may have
     # shifted if extra rows were inserted above, so adjust accordingly.
     if delete_end_row is not None:
         ws.delete_rows(delete_end_row + rows_inserted)
-        # Sync the merge registry for the same reason as the insert_data delete.
         _sync_merges_after_delete(ws, delete_end_row + rows_inserted)
 
     # Delete placeholder row (outer join, non-sorted only).  The tag row is used
@@ -963,171 +1048,11 @@ def _fill_table(ws, mc: MarkedCell, df: pl.DataFrame) -> None:
     # absent from the DataFrame.  Deletion is done last so the row is available
     # as a style source throughout, and after delete_end_row so that the end_table
     # row (which is always below the tag row) is gone first — keeping index stable.
-    if placeholder and join_mode == "outer" and order_by is None:
+    if tm.placeholder and tm.join == "outer" and tm.order_by is None:
         tag_join_val = saved_join.get(tag_row)
         if tag_join_val not in df_lookup:
             ws.delete_rows(tag_row)
             _sync_merges_after_delete(ws, tag_row)
 
 
-class ExcelTemplateWriter:
-    """Fill an Excel template with data and write the output file.
 
-    Template syntax:
-
-    * ``{{ variable }}`` — scalar placeholder; replaced with a single value.
-    * ``{{ variable | loop() }}`` — loop row tag; marks cells for row expansion.
-      All loop-tagged cells in the same row must reference list variables of the
-      same length.  The template row is duplicated N times (one per list element).
-    * ``{{ variable | table(...) }}`` — table tag; fills a structured data region.
-      Parameters:
-      - join=[left|inner|outer|right]: join strategy (default: left).
-      - on=ColName: override join column (default: use header to left of tag).
-      - order_by=[asc|desc|ColName[:asc|:desc]]: sort outer join by column (outer only).
-      - fill=[value|col1:<v1>;col2:<v2>]: fill None values globally or per-column.
-      - positional=True: fill by position, no join column or header matching.
-      - placeholder=true: tag row is used as style source for inserted rows, then
-        deleted from output if its join value is absent from the DataFrame.
-        Useful when the template has 0 real data rows between headers and a pinned
-        row (e.g. Total).  Only applies to ``join=outer``; ignored for other modes.
-      - style=first|last (default ``last``): which template row to copy styles from
-        when inserting new rows.  ``first`` copies from the tag row (plain data row
-        style); ``last`` copies from the last template row (current behaviour).
-    * ``{{ end_table }}`` — marks table boundary (optional); inserted row(s) after.
-    * ``{{ end_table | insert=above }}`` — marks table boundary; inserted row(s) before.
-    * ``{{ insert_data }}`` — marks insertion point for outer join extras (optional).
-
-    Record access (scalar only):
-    * ``{{ record_var.column_name }}`` — extract single cell from a 1-row DataFrame.
-
-    Usage::
-
-        writer = ExcelTemplateWriter("template.xlsx")
-        writer.write(
-            {
-                "title": TypedValue("Q1 Report", "single"),
-                "month": TypedValue(["Jan", "Feb", "Mar"], "list"),
-                "sales": TypedValue(sales_df, "table"),
-            },
-            "output.xlsx",
-        )
-    """
-
-    def __init__(self, template: str | PathLike[str] | bytes):
-        self._template = template
-
-    def write(self, vars: dict[str, TypedValue], file: str | PathLike[str]) -> None:
-        """Fill the template and save to *file*.
-
-        Args:
-            vars: Variable name → TypedValue.
-            file: Output path for the filled workbook.
-
-        Raises:
-            KeyError: A template tag references a variable not present in *vars*.
-            ValueError: Loop cells in the same row have lists of different lengths.
-        """
-        wb = load_excel_workbook(self._template)
-        structure = ExcelTemplateReader().read(self._template)
-
-        # Split tagged cells into loop participants, tables, and plain scalars.
-        loop_rows: dict[tuple[str, int], list[MarkedCell]] = {}
-        tables: list[MarkedCell] = []
-        scalars: list[MarkedCell] = []
-
-        for sheet_name, cells in structure.items():
-            for cell in cells:
-                if cell.name in ("end_table", "insert_data"):
-                    continue  # structural marker, not a variable
-                if _is_table(cell):
-                    tables.append(cell)
-                elif _is_loop(cell):
-                    row_n = coordinate_to_tuple(cell.cell_addr)[0]
-                    loop_rows.setdefault((sheet_name, row_n), []).append(cell)
-                else:
-                    scalars.append(cell)
-
-        # ── Scalar cells ───────────────────────────────────────────────────────
-        # Write scalars FIRST — before any row insertions from loop or table
-        # processing.  openpyxl shifts all cells below an insert_rows() call,
-        # so values already written here will ride along to their correct final
-        # positions.  Writing scalars after insertions would use stale addresses
-        # and land on the wrong rows.
-        for mc in scalars:
-            ws = wb[mc.sheet]
-            row_n, col_n = coordinate_to_tuple(mc.cell_addr)
-            if "." in mc.name:
-                var_name, col_name = mc.name.split(".", 1)
-                tv = vars[var_name]
-                if tv.value.height != 1:
-                    raise ValueError(
-                        f"Record variable '{var_name}' has {tv.value.height} rows;"
-                        " expected exactly 1"
-                    )
-                ws.cell(row_n, col_n).value = tv.value[col_name][0]
-            else:
-                ws.cell(row_n, col_n).value = vars[mc.name].value
-
-        # ── Loop rows ──────────────────────────────────────────────────────────
-        # Group by sheet then process each sheet's rows bottom-up so row inserts
-        # don't invalidate later row indices within the same sheet.
-        by_sheet: dict[str, list[tuple[int, list[MarkedCell]]]] = {}
-        for (sheet_name, row_n), cells in loop_rows.items():
-            by_sheet.setdefault(sheet_name, []).append((row_n, cells))
-
-        for sheet_name, rows in by_sheet.items():
-            ws = wb[sheet_name]
-            for row_n, cells in sorted(rows, key=lambda x: x[0], reverse=True):
-                n = len(vars[cells[0].name].value)
-
-                for mc in cells[1:]:
-                    actual = len(vars[mc.name].value)
-                    if actual != n:
-                        raise ValueError(
-                            f"Loop variables in row {row_n} of '{sheet_name}' have "
-                            f"different lengths: '{cells[0].name}'={n}, "
-                            f"'{mc.name}'={actual}"
-                        )
-
-                if n == 0:
-                    ws.delete_rows(row_n)
-                    continue
-
-                if n > 1:
-                    _copy_row_styles(ws, row_n, n - 1)
-
-                for i in range(n):
-                    for mc in cells:
-                        _, col_n = coordinate_to_tuple(mc.cell_addr)
-                        ws.cell(row_n + i, col_n).value = vars[mc.name].value[i]
-
-        # ── Collision detection ────────────────────────────────────────────────
-        # Check that no two table operations on the same sheet overlap.
-        regions_by_sheet: dict[str, list[tuple[str, tuple[int, int, int, int]]]] = {}
-        for mc in tables:
-            ws = wb[mc.sheet]
-            df = vars[mc.name].value
-            region = _compute_table_region(ws, mc, df)
-            regions_by_sheet.setdefault(mc.sheet, []).append((f"table({mc.name})", region))
-        for sheet_name, regions in regions_by_sheet.items():
-            _check_region_collisions(regions)
-
-        # ── Table cells ────────────────────────────────────────────────────────
-        # Process bottom-up per sheet so outer row insertions don't corrupt
-        # later table positions in the same sheet.
-        tables_by_sheet: dict[str, list[MarkedCell]] = {}
-        for mc in tables:
-            tables_by_sheet.setdefault(mc.sheet, []).append(mc)
-
-        for sheet_name, mcs in tables_by_sheet.items():
-            ws = wb[sheet_name]
-            for mc in sorted(
-                mcs, key=lambda c: coordinate_to_tuple(c.cell_addr)[0], reverse=True
-            ):
-                _, _, positional, _, _ = _parse_table_meta(mc)
-                if positional:
-                    _fill_positional(ws, mc, vars[mc.name].value)
-                else:
-                    _fill_table(ws, mc, vars[mc.name].value)
-
-        wb.save(file)
