@@ -6,7 +6,7 @@ Run this script to (re)generate all Excel test fixtures.
 
 from pathlib import Path
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 FIXTURES_DIR = Path(__file__).parent
 
@@ -943,6 +943,293 @@ def create_template_style_src_first():
     print("  template_style_src_first.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_combo_outer_merges_below.xlsx
+# Outer join (placeholder=True) with two adjacent same-span merges directly
+# below the table.  Primary regression test for the merge-shift bug.
+#
+# Row 1: headers Key / Value
+# Row 2: blank Key, {{ data | table(join=outer, placeholder=True) }}
+# Row 3: "Total", {{ end_data | insert=above }} (bold, yellow)
+# Row 5: A5:B5 merged "Note First" (bold, blue fill)
+# Row 6: A6:B6 merged "Note Second" (italic, orange fill)
+#
+# DF: 3 real rows (a, b, c) + Total → placeholder deleted, a/b/c inserted
+# before Total → net +2 shift → merges land at A7:B7 and A8:B8.
+# Tests: both adjacent merges survive, correct values + styles, no stale
+# ---------------------------------------------------------------------------
+def create_template_combo_outer_merges_below():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Key"
+    ws["B1"] = "Value"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["B2"] = "{{ data | table(join=outer, placeholder=True) }}"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    blue_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    ws["A5"] = "Note First"
+    ws.merge_cells("A5:B5")
+    ws["A5"].font = Font(bold=True, color="FFFFFF")
+    ws["A5"].fill = blue_fill
+
+    orange_fill = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+    ws["A6"] = "Note Second"
+    ws.merge_cells("A6:B6")
+    ws["A6"].font = Font(italic=True)
+    ws["A6"].fill = orange_fill
+
+    wb.save(FIXTURES_DIR / "template_combo_outer_merges_below.xlsx")
+    wb.close()
+    print("  template_combo_outer_merges_below.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_combo_left_with_merges.xlsx
+# Left join (no row insertion) with two adjacent merges below — merges must
+# remain completely untouched.
+#
+# Row 1: headers K / V1 / V2
+# Row 2: "x", {{ data | table(join=left) }}
+# Row 3: "y"
+# Row 4: "z"
+# Row 6: A6:C6 merged "Bottom Header" (bold, green fill)
+# Row 7: A7:C7 merged "Bottom Note" (italic, gray fill)
+#
+# DF: exactly x/y/z → no insertion → merges at A6:C6 and A7:C7 unchanged.
+# ---------------------------------------------------------------------------
+def create_template_combo_left_with_merges():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "K"
+    ws["B1"] = "V1"
+    ws["C1"] = "V2"
+    _header_style(ws, 1, range(1, 4))
+
+    ws["A2"] = "x"
+    ws["B2"] = "{{ data | table(join=left) }}"
+    ws["A3"] = "y"
+    ws["A4"] = "z"
+
+    green_fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+    ws["A6"] = "Bottom Header"
+    ws.merge_cells("A6:C6")
+    ws["A6"].font = Font(bold=True, color="FFFFFF")
+    ws["A6"].fill = green_fill
+
+    gray_fill = PatternFill(start_color="A5A5A5", end_color="A5A5A5", fill_type="solid")
+    ws["A7"] = "Bottom Note"
+    ws.merge_cells("A7:C7")
+    ws["A7"].font = Font(italic=True)
+    ws["A7"].fill = gray_fill
+
+    wb.save(FIXTURES_DIR / "template_combo_left_with_merges.xlsx")
+    wb.close()
+    print("  template_combo_left_with_merges.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_combo_scalar_with_outer.xlsx
+# Outer join (placeholder=True) with scalar cells below — scalars must shift
+# to the correct row after table expansion.
+#
+# Row 1: headers Key / Data
+# Row 2: blank Key, {{ tbl | table(join=outer, placeholder=True) }}
+# Row 3: "Total", {{ end_table | insert=above }} (bold, yellow)
+# Row 5: A5={{ title }} (bold, red fill), B5={{ summary }} (italic, blue fill)
+#
+# DF: a/b/c + Total → net +2 shift → scalars land at row 7.
+# Tests: scalar values at shifted rows, raw tags gone, styles preserved
+# ---------------------------------------------------------------------------
+def create_template_combo_scalar_with_outer():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Key"
+    ws["B1"] = "Data"
+    _header_style(ws, 1, range(1, 3))
+
+    ws["B2"] = "{{ tbl | table(join=outer, placeholder=True) }}"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+    ws["A5"] = "{{ title }}"
+    ws["A5"].font = Font(bold=True, size=12)
+    ws["A5"].fill = red_fill
+
+    blue_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    ws["B5"] = "{{ summary }}"
+    ws["B5"].font = Font(italic=True)
+    ws["B5"].fill = blue_fill
+
+    wb.save(FIXTURES_DIR / "template_combo_scalar_with_outer.xlsx")
+    wb.close()
+    print("  template_combo_scalar_with_outer.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_combo_triple_adjacent_merges.xlsx
+# PRIMARY regression test for the stale-merge-registry bug.
+# Three adjacent same-span (A:D) merges below an outer-join table — ALL three
+# must survive after the row-shift.  The bug caused the first one to be
+# silently dropped when a stale large merge was in the registry.
+#
+# Row 1: headers Sec / A / B / C
+# Row 2: blank, {{ tbl | table(join=outer, placeholder=True) }}
+# Row 3: "Total", {{ end_table | insert=above }} (bold, yellow)
+# Row 5: A5:D5 "Section One"   (bold, blue, medium border)
+# Row 6: A6:D6 "Section Two"   (italic, orange, medium border)
+# Row 7: A7:D7 "Section Three" (bold, green, medium border)
+# Row 9: B9:C9 "Narrow Note"   (italic, red) — different column span
+#
+# DF: p/q/r + Total → net +2 shift → merges land at rows 7/8/9, narrow at 11.
+# ---------------------------------------------------------------------------
+def create_template_combo_triple_adjacent_merges():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    ws["A1"] = "Sec"
+    ws["B1"] = "A"
+    ws["C1"] = "B"
+    ws["D1"] = "C"
+    _header_style(ws, 1, range(1, 5))
+
+    ws["B2"] = "{{ tbl | table(join=outer, placeholder=True) }}"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws["A3"] = "Total"
+    ws["B3"] = "{{ end_table | insert=above }}"
+    for col in range(1, 5):
+        ws.cell(3, col).font = Font(bold=True)
+        ws.cell(3, col).fill = total_fill
+
+    med = Side(style="medium")
+    border = Border(left=med, right=med, top=med, bottom=med)
+
+    blue_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    ws["A5"] = "Section One"
+    ws.merge_cells("A5:D5")
+    ws["A5"].font = Font(bold=True, color="FFFFFF")
+    ws["A5"].fill = blue_fill
+    ws["A5"].border = border
+
+    orange_fill = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+    ws["A6"] = "Section Two"
+    ws.merge_cells("A6:D6")
+    ws["A6"].font = Font(italic=True)
+    ws["A6"].fill = orange_fill
+    ws["A6"].border = border
+
+    green_fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+    ws["A7"] = "Section Three"
+    ws.merge_cells("A7:D7")
+    ws["A7"].font = Font(bold=True, color="FFFFFF")
+    ws["A7"].fill = green_fill
+    ws["A7"].border = border
+
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+    ws["B9"] = "Narrow Note"
+    ws.merge_cells("B9:C9")
+    ws["B9"].font = Font(italic=True, color="FFFFFF")
+    ws["B9"].fill = red_fill
+
+    wb.save(FIXTURES_DIR / "template_combo_triple_adjacent_merges.xlsx")
+    wb.close()
+    print("  template_combo_triple_adjacent_merges.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# template_combo_two_outer_tables.xlsx
+# Two stacked outer-join tables (each inserting 1 extra row), with an adjacent
+# pair of merges below both.  Merges must shift by the cumulative +2.
+#
+# Row 1:  K1/V1 headers
+# Row 2:  "a", {{ tbl1 | table(join=outer) }}
+# Row 3:  "b"
+# Row 4:  "Total1", {{ end_tbl1 | insert=above }} (bold, yellow)
+# Row 6:  K2/V2 headers
+# Row 7:  "x", {{ tbl2 | table(join=outer) }}
+# Row 8:  "y"
+# Row 9:  "Total2", {{ end_tbl2 | insert=above }} (bold, yellow)
+# Row 11: A11:B11 "Grand Footer" (bold, blue, medium border)
+# Row 12: A12:B12 "Sub-Footer"   (italic, gray)
+#
+# DF1: a/b/c + Total1 → +1 shift.  DF2: x/y/z + Total2 → +1 shift.
+# Net +2 → Grand Footer at A13:B13, Sub-Footer at A14:B14.
+# ---------------------------------------------------------------------------
+def create_template_combo_two_outer_tables():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    total_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    med = Side(style="medium")
+    border = Border(left=med, right=med, top=med, bottom=med)
+
+    # First outer-join table (rows 1-4)
+    ws["A1"] = "Key1"
+    ws["B1"] = "V1"
+    _header_style(ws, 1, range(1, 3))
+    ws["A2"] = "a"
+    ws["B2"] = "{{ tbl1 | table(join=outer) }}"
+    ws["A3"] = "b"
+    ws["A4"] = "Total1"
+    ws["B4"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(4, col).font = Font(bold=True)
+        ws.cell(4, col).fill = total_fill
+
+    # Second outer-join table (rows 6-9)
+    ws["A6"] = "Key2"
+    ws["B6"] = "V2"
+    _header_style(ws, 6, range(1, 3))
+    ws["A7"] = "x"
+    ws["B7"] = "{{ tbl2 | table(join=outer) }}"
+    ws["A8"] = "y"
+    ws["A9"] = "Total2"
+    ws["B9"] = "{{ end_table | insert=above }}"
+    for col in range(1, 3):
+        ws.cell(9, col).font = Font(bold=True)
+        ws.cell(9, col).fill = total_fill
+
+    # Adjacent merges below both tables (rows 11-12)
+    blue_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    ws["A11"] = "Grand Footer"
+    ws.merge_cells("A11:B11")
+    ws["A11"].font = Font(bold=True, color="FFFFFF")
+    ws["A11"].fill = blue_fill
+    ws["A11"].border = border
+
+    gray_fill = PatternFill(start_color="A5A5A5", end_color="A5A5A5", fill_type="solid")
+    ws["A12"] = "Sub-Footer"
+    ws.merge_cells("A12:B12")
+    ws["A12"].font = Font(italic=True)
+    ws["A12"].fill = gray_fill
+
+    wb.save(FIXTURES_DIR / "template_combo_two_outer_tables.xlsx")
+    wb.close()
+    print("  template_combo_two_outer_tables.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -975,4 +1262,9 @@ if __name__ == "__main__":
     create_template_placeholder_outer()
     create_template_style_src_last()
     create_template_style_src_first()
+    create_template_combo_outer_merges_below()
+    create_template_combo_left_with_merges()
+    create_template_combo_scalar_with_outer()
+    create_template_combo_triple_adjacent_merges()
+    create_template_combo_two_outer_tables()
     print("Done.")
