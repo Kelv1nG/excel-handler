@@ -2347,3 +2347,547 @@ class TestSortedOuterFillAlignmentPreservation:
         wb = self._run(tmp_path)
         ws = wb.active
         assert [ws.cell(r, 1).value for r in range(2, 6)] == ["a", "b", "c", "d"]
+
+
+# ===========================================================================
+# Master template — comprehensive border-preservation regression suite
+# ===========================================================================
+#
+# Bug fixed: _copy_row_styles and _sync_merges_after_delete both destroyed the
+# border data stored on non-top-left MergedCell objects (openpyxl loads these
+# from the Excel XML as MergedCell proxies with .has_style=True and a real
+# .border attribute).  Any section with styled merged cells sitting below an
+# expanding outer-join table was affected.
+#
+# Template: template_master.xlsx
+# Input:
+#   my_table = DataFrame(index=[1,2,3,'Total',4], colA=[A..E], colB=[10..50])
+#   some_value = 'X'
+# Net row shift after both tables expand: +6
+#   Template Section 1 rows 17–18  →  output rows 23–24
+#   Template Section 2 rows 21–27  →  output rows 27–33
+#
+# Test structure:
+#   TestMasterTableExpansion          — structural sanity (merges present, shift correct)
+#   TestMasterSection1TopleftBorders  — TL real-Cell borders of the three merges
+#   TestMasterSection1NonTopleftBorders — non-TL MergedCell borders (core bug)
+#   TestMasterSection1SeparateCells   — B18/C18 standalone cells (bottom=thick)
+#   TestMasterSection2HeaderMerge     — B21:H21 single-row merge (all cells)
+#   TestMasterSection2BodyMergeTopRow — B22:H22 top edge of 6-row merge
+#   TestMasterSection2BodyMergeSides  — B/H col side borders in body rows 23–26
+#   TestMasterSection2BodyMergeBottom — B33–H33 bottom edge of 6-row merge
+#   TestMasterNoSpuriousBorders       — negative: borders that MUST NOT appear
+# ===========================================================================
+
+def _border_sides(ws, row: int, col: int) -> dict:
+    """Return a mapping of active border side names → style string for (row, col).
+
+    Only sides with a non-None/non-empty style are included.  Handles both real
+    Cell objects and MergedCell proxies; returns {} for absent cells or cells
+    whose border sides all have style=None.
+    """
+    cell = ws._cells.get((row, col))
+    if cell is None:
+        return {}
+    b = cell.border
+    if b is None:
+        return {}
+    result = {}
+    for side in ("top", "bottom", "left", "right"):
+        s = getattr(b, side, None)
+        if s is not None and s.style:
+            result[side] = s.style
+    return result
+
+
+class _MasterBase:
+    """Shared runner for master-template tests."""
+
+    _DF = pl.DataFrame(
+        {
+            "index": [1, 2, 3, "Total", 4],
+            "colA": ["A", "B", "C", "D", "E"],
+            "colB": [10, 20, 30, 40, 50],
+        },
+        strict=False,
+    )
+    _SCALAR = "X"
+    # Net row offset: Section 1 template rows 17–18 → output rows 23–24 (+6)
+    _SHIFT = 6
+
+    def _run(self, template_path, tmp_path) -> "Workbook":
+        out = str(tmp_path / "output.xlsx")
+        ExcelTemplateWriter(template_path).write(
+            {
+                "my_table": TypedValue(self._DF, "table"),
+                "some_value": TypedValue(self._SCALAR, "single"),
+            },
+            out,
+        )
+        return load_workbook(out)
+
+
+# ---------------------------------------------------------------------------
+# Structural sanity: the merge ranges we care about must survive the shift
+# ---------------------------------------------------------------------------
+
+class TestMasterTableExpansion(_MasterBase):
+    """Sanity checks: correct row shift and merge ranges present after fill."""
+
+    def test_section1_merge_B_C_present(self, template_master_path, tmp_path):
+        """B17:C17 equiv must be a merge in the output at the shifted position."""
+        wb = self._run(template_master_path, tmp_path)
+        ranges = {str(m) for m in wb.active.merged_cells.ranges}
+        assert "B23:C23" in ranges, f"Expected B23:C23 merge, got: {ranges}"
+
+    def test_section1_merge_D_vertical_present(self, template_master_path, tmp_path):
+        """D17:D18 equiv must survive as D23:D24 after +6 shift."""
+        wb = self._run(template_master_path, tmp_path)
+        ranges = {str(m) for m in wb.active.merged_cells.ranges}
+        assert "D23:D24" in ranges, f"Expected D23:D24 merge, got: {ranges}"
+
+    def test_section1_merge_E_vertical_present(self, template_master_path, tmp_path):
+        """E17:E18 equiv must survive as E23:E24 after +6 shift."""
+        wb = self._run(template_master_path, tmp_path)
+        ranges = {str(m) for m in wb.active.merged_cells.ranges}
+        assert "E23:E24" in ranges, f"Expected E23:E24 merge, got: {ranges}"
+
+    def test_section2_header_merge_present(self, template_master_path, tmp_path):
+        """B21:H21 equiv must survive as B27:H27 after +6 shift."""
+        wb = self._run(template_master_path, tmp_path)
+        ranges = {str(m) for m in wb.active.merged_cells.ranges}
+        assert "B27:H27" in ranges, f"Expected B27:H27 merge, got: {ranges}"
+
+    def test_section2_body_merge_present(self, template_master_path, tmp_path):
+        """B22:H27 equiv must survive as B28:H33 after +6 shift."""
+        wb = self._run(template_master_path, tmp_path)
+        ranges = {str(m) for m in wb.active.merged_cells.ranges}
+        assert "B28:H33" in ranges, f"Expected B28:H33 merge, got: {ranges}"
+
+    def test_scalar_value_written(self, template_master_path, tmp_path):
+        """The some_value scalar must be written into B28 (TL of body merge)."""
+        wb = self._run(template_master_path, tmp_path)
+        assert wb.active.cell(28, 2).value == self._SCALAR
+
+    def test_section1_b17_value_preserved(self, template_master_path, tmp_path):
+        """'headerColumn1' label at B17 must survive at B23 after shift."""
+        wb = self._run(template_master_path, tmp_path)
+        assert wb.active.cell(23, 2).value == "headerColumn1"
+
+
+# ---------------------------------------------------------------------------
+# Section 1 — top-left (real Cell) borders
+# Template row 17 → output row 23; template row 18 → output row 24
+# ---------------------------------------------------------------------------
+
+class TestMasterSection1TopleftBorders(_MasterBase):
+    """TL real-Cell borders of section 1 merged ranges (standard cell preservation)."""
+
+    # B23: TL of B17:C17 — left=thick, right=thin, top=thick, bottom=thin
+    def test_B23_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 2).get("top") == "thick"
+
+    def test_B23_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 2).get("bottom") == "thin"
+
+    def test_B23_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 2).get("left") == "thick"
+
+    def test_B23_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 2).get("right") == "thin"
+
+    # D23: TL of D17:D18 — left=thin, right=thin, top=thick, bottom=thin
+    def test_D23_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 4).get("top") == "thick"
+
+    def test_D23_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 4).get("bottom") == "thin"
+
+    def test_D23_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 4).get("left") == "thin"
+
+    def test_D23_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 4).get("right") == "thin"
+
+    # E23: TL of E17:E18 — left=thin, right=thick, top=thick, bottom=thin
+    def test_E23_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 5).get("top") == "thick"
+
+    def test_E23_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 5).get("right") == "thick"
+
+    def test_E23_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 5).get("left") == "thin"
+
+
+# ---------------------------------------------------------------------------
+# Section 1 — non-top-left MergedCell borders (direct regression for the bug)
+# ---------------------------------------------------------------------------
+
+class TestMasterSection1NonTopleftBorders(_MasterBase):
+    """Non-TL MergedCell borders in section 1 — the primary regression target.
+
+    These cells are loaded by openpyxl as MergedCell proxy objects whose .border
+    attribute holds the edge-rendering data Excel stores per-cell.  Before the fix,
+    _safe_remove_merge purged these objects, destroying the border data; the cells
+    were recreated as blank proxies after ws.merge_cells().
+    """
+
+    # C23: non-TL of B17:C17 — top=thick, bottom=thin, right=thin  (NO left!)
+    def test_C23_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 3).get("top") == "thick"
+
+    def test_C23_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 3).get("bottom") == "thin"
+
+    def test_C23_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 3).get("right") == "thin"
+
+    def test_C23_no_left(self, template_master_path, tmp_path):
+        """C23 is the interior non-TL of B17:C17 — it must NOT carry a left border."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 3).get("left") is None
+
+    # D24: non-TL of D17:D18 — bottom=thin, left=thin, right=thin  (NO top!)
+    def test_D24_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 4).get("bottom") == "thin"
+
+    def test_D24_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 4).get("left") == "thin"
+
+    def test_D24_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 4).get("right") == "thin"
+
+    def test_D24_no_top(self, template_master_path, tmp_path):
+        """D24 is the non-TL of D17:D18 — it must NOT carry a top border."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 4).get("top") is None
+
+    # E24: non-TL of E17:E18 — bottom=thin, left=thin, right=thick  (NO top!)
+    def test_E24_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 5).get("bottom") == "thin"
+
+    def test_E24_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 5).get("left") == "thin"
+
+    def test_E24_right(self, template_master_path, tmp_path):
+        """E24 is the right-edge non-TL of E17:E18 — right=thick must be preserved."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 5).get("right") == "thick"
+
+    def test_E24_no_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 5).get("top") is None
+
+
+# ---------------------------------------------------------------------------
+# Section 1 — separate real cells B18/C18 (bottom=thick, independent of merge)
+# ---------------------------------------------------------------------------
+
+class TestMasterSection1SeparateCells(_MasterBase):
+    """B18 and C18 are plain cells outside any merge — their borders must survive."""
+
+    def test_B24_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 2).get("top") == "thin"
+
+    def test_B24_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 2).get("bottom") == "thick"
+
+    def test_B24_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 2).get("left") == "thick"
+
+    def test_B24_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 2).get("right") == "thin"
+
+    def test_C24_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 3).get("top") == "thin"
+
+    def test_C24_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 3).get("bottom") == "thick"
+
+    def test_C24_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 3).get("left") == "thin"
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — B21:H21 header merge (output B27:H27) — all cells
+# ---------------------------------------------------------------------------
+
+class TestMasterSection2HeaderMerge(_MasterBase):
+    """B21:H21 equiv at B27:H27 — thick-framed single-row merge with fill."""
+
+    # B27: TL — left=thick, right=thick, top=thick  (NO bottom on header)
+    def test_B27_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 2).get("top") == "thick"
+
+    def test_B27_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 2).get("left") == "thick"
+
+    def test_B27_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 2).get("right") == "thick"
+
+    def test_B27_no_bottom(self, template_master_path, tmp_path):
+        """B27 TL of header merge must not have a bottom border (template has none)."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 2).get("bottom") is None
+
+    # C27–G27: non-TL MCs — top=thick only
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_top_thick(self, col, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, col).get("top") == "thick", (
+            f"Column {col} row 27: expected top=thick"
+        )
+
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_no_left_right_bottom(self, col, template_master_path, tmp_path):
+        """Interior non-TL MCs C27–G27 must not carry left/right/bottom borders."""
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, 27, col)
+        for spurious in ("left", "right", "bottom"):
+            assert spurious not in sides, (
+                f"Column {col} row 27: unexpected {spurious}={sides[spurious]!r}"
+            )
+
+    # H27: non-TL right edge — top=thick, right=thick
+    def test_H27_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 8).get("top") == "thick"
+
+    def test_H27_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 8).get("right") == "thick"
+
+    def test_H27_no_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 27, 8).get("bottom") is None
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — B22:H27 body merge top row (output B28:H28)
+# ---------------------------------------------------------------------------
+
+class TestMasterSection2BodyMergeTopRow(_MasterBase):
+    """Top row of the 6-row body merge (B28:H28) — thin border all edges."""
+
+    # B28: TL of body merge — all thin borders
+    def test_B28_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 2).get("top") == "thin"
+
+    def test_B28_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 2).get("bottom") == "thin"
+
+    def test_B28_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 2).get("left") == "thin"
+
+    def test_B28_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 2).get("right") == "thin"
+
+    # C28–G28: non-TL MCs — top=thin only
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_top_thin(self, col, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, col).get("top") == "thin", (
+            f"Column {col} row 28: expected top=thin"
+        )
+
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_no_other_borders(self, col, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, 28, col)
+        for spurious in ("left", "right", "bottom"):
+            assert spurious not in sides, (
+                f"Column {col} row 28: unexpected {spurious}={sides.get(spurious)!r}"
+            )
+
+    # H28: right-edge non-TL — top=thin, right=thin
+    def test_H28_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 8).get("top") == "thin"
+
+    def test_H28_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 8).get("right") == "thin"
+
+    def test_H28_no_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 28, 8).get("bottom") is None
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — body rows 29–32 (output rows 29–32) — only side columns
+# ---------------------------------------------------------------------------
+
+class TestMasterSection2BodyMergeSides(_MasterBase):
+    """Left and right column of body merge interior rows 29–32."""
+
+    @pytest.mark.parametrize("row", [29, 30, 31, 32])
+    def test_left_col_left_thin(self, row, template_master_path, tmp_path):
+        """B-col non-TL MCs in body rows must have left=thin."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, row, 2).get("left") == "thin", (
+            f"Row {row} col B: expected left=thin"
+        )
+
+    @pytest.mark.parametrize("row", [29, 30, 31, 32])
+    def test_left_col_no_other(self, row, template_master_path, tmp_path):
+        """B-col body rows must ONLY have left=thin (no top/bottom/right)."""
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, row, 2)
+        assert sides == {"left": "thin"}, (
+            f"Row {row} col B: expected only left=thin, got {sides}"
+        )
+
+    @pytest.mark.parametrize("row", [29, 30, 31, 32])
+    def test_right_col_right_thin(self, row, template_master_path, tmp_path):
+        """H-col non-TL MCs in body rows must have right=thin."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, row, 8).get("right") == "thin", (
+            f"Row {row} col H: expected right=thin"
+        )
+
+    @pytest.mark.parametrize("row", [29, 30, 31, 32])
+    def test_right_col_no_other(self, row, template_master_path, tmp_path):
+        """H-col body rows must ONLY have right=thin (no top/bottom/left)."""
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, row, 8)
+        assert sides == {"right": "thin"}, (
+            f"Row {row} col H: expected only right=thin, got {sides}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — body merge bottom row (output row 33) — all columns
+# ---------------------------------------------------------------------------
+
+class TestMasterSection2BodyMergeBottom(_MasterBase):
+    """Bottom row of the 6-row body merge (row 33) — thin bottom edge."""
+
+    def test_B33_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, 2).get("bottom") == "thin"
+
+    def test_B33_left(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, 2).get("left") == "thin"
+
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_bottom_thin(self, col, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, col).get("bottom") == "thin", (
+            f"Column {col} row 33: expected bottom=thin"
+        )
+
+    @pytest.mark.parametrize("col", [3, 4, 5, 6, 7])
+    def test_inner_cols_no_side_borders(self, col, template_master_path, tmp_path):
+        """Inner bottom non-TL MCs must not have left/right borders."""
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, 33, col)
+        for spurious in ("left", "right", "top"):
+            assert spurious not in sides, (
+                f"Column {col} row 33: unexpected {spurious}={sides.get(spurious)!r}"
+            )
+
+    def test_H33_bottom(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, 8).get("bottom") == "thin"
+
+    def test_H33_right(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, 8).get("right") == "thin"
+
+    def test_H33_no_top(self, template_master_path, tmp_path):
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 33, 8).get("top") is None
+
+
+# ---------------------------------------------------------------------------
+# Negative: borders that must NOT appear (spurious-border regression)
+# ---------------------------------------------------------------------------
+
+class TestMasterNoSpuriousBorders(_MasterBase):
+    """Guard against spurious borders introduced by the fixed bug.
+
+    Before the fix, _sync_merges_after_delete could cause the top-left Cell of
+    a merge to acquire border sides it should not have (e.g. B27 gaining right=thick
+    from H21's non-TL MC via a wrong key lookup in the restore dict).
+    """
+
+    def test_B27_no_spurious_right_from_H21(self, template_master_path, tmp_path):
+        """B27 (TL of B27:H27) must NOT inherit H21's right=thick border.
+
+        This was the primary symptom of the non-TL restore offset bug: the
+        computed key matched B27 instead of H27, copying right=thick onto the
+        wrong cell.
+        """
+        wb = self._run(template_master_path, tmp_path)
+        # B27 should have left=thick, right=thick, top=thick — but the right=thick
+        # it has is its OWN border from template B21, not a spurious copy.
+        # What it must NOT do is end up with multiple extra left/right borders.
+        sides = _border_sides(wb.active, 27, 2)
+        # Confirm only the expected set is present
+        assert sides == {"top": "thick", "left": "thick", "right": "thick"}, (
+            f"B27 border mismatch: {sides}"
+        )
+
+    def test_C23_no_spurious_left(self, template_master_path, tmp_path):
+        """C23 (non-TL of B23:C23) must not have a left border.
+
+        Template C17 carries no left border — that side belongs to B17.
+        """
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 23, 3).get("left") is None
+
+    def test_D24_no_spurious_top(self, template_master_path, tmp_path):
+        """D24 (non-TL of D23:D24) must not have a top border.
+
+        Template D18 carries no top — it is the interior non-TL of the vertical merge.
+        """
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 4).get("top") is None
+
+    def test_E24_no_spurious_top(self, template_master_path, tmp_path):
+        """E24 (non-TL of E23:E24) must not have a top border."""
+        wb = self._run(template_master_path, tmp_path)
+        assert _border_sides(wb.active, 24, 5).get("top") is None
+
+    def test_B28_no_extra_borders(self, template_master_path, tmp_path):
+        """B28 (TL of body merge) must have exactly the four thin sides."""
+        wb = self._run(template_master_path, tmp_path)
+        sides = _border_sides(wb.active, 28, 2)
+        assert sides == {"top": "thin", "bottom": "thin", "left": "thin", "right": "thin"}, (
+            f"B28 unexpected border set: {sides}"
+        )

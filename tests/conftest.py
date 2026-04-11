@@ -218,6 +218,25 @@ def bug_on_insert_path():
 
 
 @pytest.fixture(scope="session")
+def template_master_path():
+    """Master template for comprehensive border-preservation regression tests.
+
+    Layout (Sheet1):
+      Rows  3–10  — Table 1: outer join with insert_data + end_table
+      Rows 12–14  — Table 2: outer join, placeholder=True, end_table|insert=above
+      Rows 17–18  — Styled Section 1: three overlapping merges (B17:C17, D17:D18,
+                    E17:E18) with thick/thin border mix and separate cells B18/C18
+      Rows 21–27  — Styled Section 2: B21:H21 single-row wide merge (fill, thick
+                    frame) + B22:H27 6×7 multi-row merge (scalar placeholder, thin)
+
+    Reference input: my_table=5-row DF (index=[1,2,3,'Total',4]), some_value='X'
+    Net row shift after both tables expand: +6
+      Section 1 → output rows 23–24; Section 2 → output rows 27–33
+    """
+    return str(FIXTURES_DIR / "template_master.xlsx")
+
+
+@pytest.fixture(scope="session")
 def template_placeholder_outer_path():
     """Template with placeholder=true tag and end_table|insert=above on Total row.
     Row 1: headers. Row 2: blank join col + tag (plain style). Row 3: Total (bold, yellow).
