@@ -551,6 +551,7 @@ def _copy_row_styles(
                 dst.fill = copy(style["fill"])
                 dst.number_format = style["number_format"]
                 dst.protection = copy(style["protection"])
+                dst.alignment = copy(style["alignment"])
 
 
 # ── 2. Table boundary scanning ─────────────────────────────────────────────

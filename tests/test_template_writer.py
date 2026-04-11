@@ -1975,3 +1975,375 @@ class TestComboTwoOuterTables:
         ranges = _merge_ranges(wb.active)
         assert "A11:B11" not in ranges, "Stale A11:B11 still present"
         assert "A12:B12" not in ranges, "Stale A12:B12 still present"
+
+
+# ---------------------------------------------------------------------------
+# Alignment preservation — inserted rows must inherit the source row's alignment
+# ---------------------------------------------------------------------------
+
+class TestAlignmentPreservation:
+    """Regression test: _copy_row_styles was saving alignment in the style
+    snapshot but never writing ``dst.alignment`` for inserted rows.  Inserted
+    rows therefore silently lost whatever alignment the source template row had,
+    falling back to Excel's default (right for numbers, left for strings).
+
+    Template (built inline):
+      Row 1: headers (Index / Value)
+      Row 2: 'a' / tag — explicit center alignment on both cells (this is also
+             the *only* data row, so last_tmpl_row = tag_row = 2)
+
+    DataFrame: a=10, b=20, c=30  →  b and c are outer-join extras.
+    With style=last (default) the style source is last_tmpl_row = row 2 = center.
+    Both inserted rows must carry that center alignment.
+    """
+
+    # Single-row template: last_tmpl_row == tag_row (row 2, center).
+    # DF has a (matched), b and c (extra → inserted from row 2).
+    _DF = pl.DataFrame({
+        "Index": ["a", "b", "c"],
+        "Value": [10, 20, 30],
+    })
+
+    def _build_template(self, tmp_path) -> str:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+
+        ws["A1"] = "Index"
+        ws["B1"] = "Value"
+
+        center = Alignment(horizontal="center")
+
+        # Single data row — center alignment on both columns.
+        ws["A2"] = "a"
+        ws["B2"] = "{{ data | table(join=outer) }}"
+        ws["A2"].alignment = center
+        ws["B2"].alignment = center
+
+        path = str(tmp_path / "tmpl_alignment.xlsx")
+        wb.save(path)
+        return path
+
+    def _run(self, tmp_path):
+        tpl = self._build_template(tmp_path)
+        out = str(tmp_path / "out_alignment.xlsx")
+        ExcelTemplateWriter(tpl).write({"data": TypedValue(self._DF, "table")}, out)
+        return load_workbook(out)
+
+    def test_inserted_rows_have_center_alignment(self, tmp_path):
+        """b and c are outer-join extras inserted after the single template row.
+        style=last → source = last_tmpl_row = row 2 = center.
+        Both inserted rows must carry center alignment on every data column."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        # After fill: row 2=a, row 3=b (inserted), row 4=c (inserted)
+        assert ws.cell(3, 1).alignment.horizontal == "center", (
+            "inserted row 3 (b) col A: expected center alignment, "
+            f"got {ws.cell(3, 1).alignment.horizontal!r}"
+        )
+        assert ws.cell(3, 2).alignment.horizontal == "center", (
+            "inserted row 3 (b) col B: expected center alignment, "
+            f"got {ws.cell(3, 2).alignment.horizontal!r}"
+        )
+        assert ws.cell(4, 1).alignment.horizontal == "center", (
+            "inserted row 4 (c) col A: expected center alignment, "
+            f"got {ws.cell(4, 1).alignment.horizontal!r}"
+        )
+        assert ws.cell(4, 2).alignment.horizontal == "center", (
+            "inserted row 4 (c) col B: expected center alignment, "
+            f"got {ws.cell(4, 2).alignment.horizontal!r}"
+        )
+
+    def test_tag_row_alignment_preserved(self, tmp_path):
+        """The original tag row (row 2, 'a') must keep its center alignment after fill."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).alignment.horizontal == "center", (
+            "tag row A2: center alignment was lost after fill"
+        )
+
+    def test_style_first_inserted_rows_inherit_tag_alignment(self, tmp_path):
+        """With style=first, inserted rows copy the tag row's alignment even when
+        the last template row has a different alignment (right)."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "Index"
+        ws["B1"] = "Value"
+
+        center = Alignment(horizontal="center")
+        right = Alignment(horizontal="right")
+
+        # Tag row: center (style source for style=first)
+        ws["A2"] = "a"
+        ws["B2"] = "{{ data | table(join=outer, style=first) }}"
+        ws["A2"].alignment = center
+        ws["B2"].alignment = center
+
+        # Total row: right + bold (style source for style=last — must NOT be used)
+        ws["A3"] = "Total"
+        ws["B3"] = 999
+        ws["A3"].alignment = right
+        ws["B3"].alignment = right
+        for col in range(1, 3):
+            ws.cell(3, col).font = Font(bold=True)
+
+        tpl = str(tmp_path / "tmpl_style_first_align.xlsx")
+        wb.save(tpl)
+
+        df = pl.DataFrame({"Index": ["a", "b", "c", "Total"], "Value": [1, 2, 3, 999]})
+        out = str(tmp_path / "out_style_first_align.xlsx")
+        ExcelTemplateWriter(tpl).write({"data": TypedValue(df, "table")}, out)
+        ws_out = load_workbook(out).active
+
+        # After fill: row 2=a (center), row 3=Total (right, matched template),
+        # row 4=b (inserted after row 3), row 5=c (inserted after row 3).
+        # style=first → source = tag_row (row 2, center) → rows 4 and 5 must be center.
+        assert ws_out.cell(4, 1).alignment.horizontal == "center", (
+            "style=first: inserted row 4 (b) should have center alignment from tag row, "
+            f"got {ws_out.cell(4, 1).alignment.horizontal!r}"
+        )
+        assert ws_out.cell(5, 1).alignment.horizontal == "center", (
+            "style=first: inserted row 5 (c) should have center alignment from tag row, "
+            f"got {ws_out.cell(5, 1).alignment.horizontal!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Alignment — loop() row expansion
+# ---------------------------------------------------------------------------
+
+class TestLoopRowAlignmentPreservation:
+    """loop() rows are expanded via _copy_row_styles.  The alignment on the
+    template row must be copied to every expanded duplicate row.
+
+    Template (built inline):
+      Row 1: header
+      Row 2: {{ month | loop() }} / {{ value | loop() }} — center-aligned
+
+    Three-item lists expand the template row to 3 rows.  All must be center.
+    """
+
+    def _build_template(self, tmp_path) -> str:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "Month"
+        ws["B1"] = "Value"
+
+        center = Alignment(horizontal="center")
+        ws["A2"] = "{{ month | loop() }}"
+        ws["B2"] = "{{ value | loop() }}"
+        ws["A2"].alignment = center
+        ws["B2"].alignment = center
+
+        path = str(tmp_path / "tmpl_loop_align.xlsx")
+        wb.save(path)
+        return path
+
+    def _run(self, tmp_path):
+        tpl = self._build_template(tmp_path)
+        out = str(tmp_path / "out_loop_align.xlsx")
+        ExcelTemplateWriter(tpl).write(
+            {
+                "month": TypedValue(["Jan", "Feb", "Mar"], "list"),
+                "value": TypedValue([10, 20, 30], "list"),
+            },
+            out,
+        )
+        return load_workbook(out)
+
+    def test_all_expanded_rows_have_center_alignment(self, tmp_path):
+        """All 3 expanded loop rows (2, 3, 4) must carry center alignment."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        for row in range(2, 5):
+            for col in (1, 2):
+                assert ws.cell(row, col).alignment.horizontal == "center", (
+                    f"loop row {row} col {col}: expected center, "
+                    f"got {ws.cell(row, col).alignment.horizontal!r}"
+                )
+
+    def test_expanded_row_values(self, tmp_path):
+        """Sanity: values are written correctly into the expanded rows."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        assert [ws.cell(r, 1).value for r in range(2, 5)] == ["Jan", "Feb", "Mar"]
+        assert [ws.cell(r, 2).value for r in range(2, 5)] == [10, 20, 30]
+
+
+# ---------------------------------------------------------------------------
+# Alignment — join=right table inserts
+# ---------------------------------------------------------------------------
+
+class TestRightJoinAlignmentPreservation:
+    """join=right inserts rows when the DataFrame is longer than the template.
+    Inserted rows must carry the alignment of the style-source row.
+
+    Template (built inline):
+      Row 1: headers (Key / Val)
+      Row 2: x / tag {{ data | table(join=right) }}  — center-aligned (tag row)
+      Row 3: y                                        — right-aligned  (last tmpl row)
+
+    DataFrame has 5 rows → 3 extras inserted.
+
+    style=last (default): style source = last_tmpl_row (row 3, right).
+                          Inserted rows must be right-aligned.
+    style=first:          style source = tag_row (row 2, center).
+                          Inserted rows must be center-aligned.
+    """
+
+    _DF = pl.DataFrame({
+        "Key": ["a", "b", "c", "d", "e"],
+        "Val": [1, 2, 3, 4, 5],
+    })
+
+    def _build_template(self, tmp_path, style_param: str = "") -> str:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "Key"
+        ws["B1"] = "Val"
+
+        center = Alignment(horizontal="center")
+        right = Alignment(horizontal="right")
+
+        tag = f"{{{{ data | table(join=right{style_param}) }}}}"
+        ws["A2"] = "x"
+        ws["B2"] = tag
+        ws["A2"].alignment = center
+        ws["B2"].alignment = center
+
+        ws["A3"] = "y"
+        ws["B3"] = None
+        ws["A3"].alignment = right
+        ws["B3"].alignment = right
+
+        path = str(tmp_path / f"tmpl_right{style_param.replace(',','').replace('=','').replace(' ','')}.xlsx")
+        wb.save(path)
+        return path
+
+    def _run(self, tmp_path, style_param: str = ""):
+        tpl = self._build_template(tmp_path, style_param)
+        out = str(tmp_path / f"out_right{style_param.replace(',','').replace('=','').replace(' ','')}.xlsx")
+        ExcelTemplateWriter(tpl).write({"data": TypedValue(self._DF, "table")}, out)
+        return load_workbook(out)
+
+    def test_right_join_style_last_inserted_rows_alignment(self, tmp_path):
+        """style=last: inserted rows must copy alignment from the last template
+        row (row 3, right-aligned).  Verifies alignment is not silently dropped."""
+        wb = self._run(tmp_path, style_param="")
+        ws = wb.active
+        # Template: 2 rows, DF: 5 rows → 3 inserted; output has 5 data rows (2-6)
+        # Inserted rows come after last_tmpl_row (row 3) → rows 4, 5, 6 are new
+        for row in (4, 5, 6):
+            assert ws.cell(row, 1).alignment.horizontal == "right", (
+                f"style=last: inserted row {row} col A: expected right, "
+                f"got {ws.cell(row, 1).alignment.horizontal!r}"
+            )
+
+    def test_right_join_style_first_inserted_rows_alignment(self, tmp_path):
+        """style=first: inserted rows must copy alignment from the tag row
+        (row 2, center-aligned), not from the last template row (right)."""
+        wb = self._run(tmp_path, style_param=", style=first")
+        ws = wb.active
+        # style=first inserts after tag_row (row 2); original row 3 shifts to row 6.
+        # Inserted rows (3, 4, 5) must be center-aligned.
+        for row in (3, 4, 5):
+            assert ws.cell(row, 1).alignment.horizontal == "center", (
+                f"style=first: inserted row {row} col A: expected center, "
+                f"got {ws.cell(row, 1).alignment.horizontal!r}"
+            )
+
+    def test_right_join_data_values_correct(self, tmp_path):
+        """Sanity: all 5 DF rows appear in the output regardless of style."""
+        wb = self._run(tmp_path, style_param="")
+        ws = wb.active
+        assert [ws.cell(r, 1).value for r in range(2, 7)] == ["a", "b", "c", "d", "e"]
+        assert [ws.cell(r, 2).value for r in range(2, 7)] == [1, 2, 3, 4, 5]
+
+
+# ---------------------------------------------------------------------------
+# Alignment — sorted outer fill (order_by) inserts
+# ---------------------------------------------------------------------------
+
+class TestSortedOuterFillAlignmentPreservation:
+    """_sorted_outer_fill calls _copy_row_styles(ws, upper_last_row, n) when
+    the DF has more rows than the upper zone.  The alignment on upper_last_row
+    must be carried to the inserted rows.
+
+    Template (built inline):
+      Row 1: headers (Index / Value)
+      Row 2: 'a' / tag {{ data | table(join=outer, order_by=asc) }} — center
+      Row 3: end_table marker row (deleted after processing)
+
+    DF: a=10, b=20, c=30, d=40 → 3 extras need inserting into a 1-slot zone.
+    upper_last_row = row 2 (center) → inserted rows must be center-aligned.
+    """
+
+    _DF = pl.DataFrame({
+        "Index": ["a", "b", "c", "d"],
+        "Value": [10, 20, 30, 40],
+    })
+
+    def _build_template(self, tmp_path) -> str:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "Index"
+        ws["B1"] = "Value"
+
+        center = Alignment(horizontal="center")
+        ws["A2"] = "a"
+        ws["B2"] = "{{ data | table(join=outer, order_by=asc) }}"
+        ws["A2"].alignment = center
+        ws["B2"].alignment = center
+
+        # Option A end_table: A3 is empty (join col), end_table in data col B3.
+        # This makes _fill_table treat row 3 as a standalone marker row
+        # (last_tmpl_row = 2), not a data row (which would set last_tmpl_row = 3
+        # and wipe out the alignment source).
+        ws["B3"] = "{{ end_table }}"
+
+        path = str(tmp_path / "tmpl_sorted_outer_align.xlsx")
+        wb.save(path)
+        return path
+
+    def _run(self, tmp_path):
+        tpl = self._build_template(tmp_path)
+        out = str(tmp_path / "out_sorted_outer_align.xlsx")
+        ExcelTemplateWriter(tpl).write({"data": TypedValue(self._DF, "table")}, out)
+        return load_workbook(out)
+
+    def test_inserted_rows_have_center_alignment(self, tmp_path):
+        """b, c, d are extra rows inserted by sorted outer fill.  upper_last_row
+        (row 2) is center-aligned, so inserted rows must also be center-aligned."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        # Output: rows 2-5 for a, b, c, d (end_table row deleted)
+        for row in (3, 4, 5):
+            assert ws.cell(row, 1).alignment.horizontal == "center", (
+                f"sorted outer: inserted row {row} col A: expected center, "
+                f"got {ws.cell(row, 1).alignment.horizontal!r}"
+            )
+
+    def test_data_values_sorted_asc(self, tmp_path):
+        """Sanity: sorted output a→d in ascending order."""
+        wb = self._run(tmp_path)
+        ws = wb.active
+        assert [ws.cell(r, 1).value for r in range(2, 6)] == ["a", "b", "c", "d"]
