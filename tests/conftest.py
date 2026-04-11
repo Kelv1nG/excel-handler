@@ -242,6 +242,16 @@ def template_style_src_first_path():
 
 
 @pytest.fixture(scope="session")
+def template_empty_outer_style_first_path():
+    """Template with empty table: outer join + style=first + end_table|insert=above.
+    Row 1: headers. Row 2: plain tag row (blank join col). Row 3: styled end_table marker.
+    Used to verify: when DataFrame is filled, inserted rows copy style from tag row (plain),
+    NOT from end_table row (bold + yellow).  Tests the edge case of empty template table.
+    """
+    return str(FIXTURES_DIR / "template_empty_outer_style_first.xlsx")
+
+
+@pytest.fixture(scope="session")
 def template_combo_outer_merges_below_path():
     """Outer join (placeholder=True) + 2 adjacent same-span merges below the table.
     DF a/b/c+Total → net +2 shift → merges land at A7:B7 and A8:B8.
