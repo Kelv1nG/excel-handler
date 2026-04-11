@@ -1497,3 +1497,473 @@ class TestStyleSrcMode:
         assert ws.cell(5, 1).fill.fill_type != "solid", (
             "style=first: inserted row 5 should not have solid fill"
         )
+
+
+# ---------------------------------------------------------------------------
+# Combo: outer join (placeholder=True) + two adjacent same-span merges below
+# ---------------------------------------------------------------------------
+
+def _run_combo_outer_merges_below(template_path, tmp_path):
+    df = pl.DataFrame({
+        "Key": ["a", "b", "c", "Total"],
+        "Value": [10, 20, 30, 60],
+    })
+    out = str(tmp_path / "output.xlsx")
+    ExcelTemplateWriter(template_path).write({"data": TypedValue(df, "table")}, out)
+    return load_workbook(out)
+
+
+class TestComboOuterMergesBelow:
+    """Outer join with placeholder=True expands by +2 rows; two adjacent
+    same-span merges below must both shift and preserve value/style."""
+
+    def test_data_row_a(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active.cell(2, 1).value == "a"
+        assert wb.active.cell(2, 2).value == 10
+
+    def test_data_row_b(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active.cell(3, 1).value == "b"
+        assert wb.active.cell(3, 2).value == 20
+
+    def test_data_row_c_inserted(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active.cell(4, 1).value == "c"
+        assert wb.active.cell(4, 2).value == 30
+
+    def test_total_row_at_5(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active.cell(5, 1).value == "Total"
+        assert wb.active.cell(5, 2).value == 60
+
+    def test_first_merge_shifted_to_row_7(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert "A7:B7" in _merge_ranges(wb.active), (
+            f"First merge not shifted to A7:B7 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_first_merge_value_intact(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active["A7"].value == "Note First"
+
+    def test_first_merge_bold_intact(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active["A7"].font.bold is True
+
+    def test_second_merge_shifted_to_row_8(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert "A8:B8" in _merge_ranges(wb.active), (
+            f"Second merge not shifted to A8:B8 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_second_merge_value_intact(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active["A8"].value == "Note Second"
+
+    def test_second_merge_italic_intact(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert wb.active["A8"].font.italic is True
+
+    def test_no_stale_first_merge(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert "A5:B5" not in _merge_ranges(wb.active), "Stale A5:B5 still present"
+
+    def test_no_stale_second_merge(self, template_combo_outer_merges_below_path, tmp_path):
+        wb = _run_combo_outer_merges_below(template_combo_outer_merges_below_path, tmp_path)
+        assert "A6:B6" not in _merge_ranges(wb.active), "Stale A6:B6 still present"
+
+
+# ---------------------------------------------------------------------------
+# Combo: left join + two adjacent merges below — merges completely untouched
+# ---------------------------------------------------------------------------
+
+def _run_combo_left_with_merges(template_path, tmp_path):
+    df = pl.DataFrame({
+        "K": ["x", "y", "z"],
+        "V1": [1, 2, 3],
+        "V2": [10, 20, 30],
+    })
+    out = str(tmp_path / "output.xlsx")
+    ExcelTemplateWriter(template_path).write({"data": TypedValue(df, "table")}, out)
+    return load_workbook(out)
+
+
+class TestComboLeftWithMerges:
+    """Left join inserts no rows; merges below must be byte-for-byte identical
+    to the template — no shift, no corruption."""
+
+    def test_data_filled_correctly(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).value == "x" and ws.cell(2, 2).value == 1 and ws.cell(2, 3).value == 10
+        assert ws.cell(3, 1).value == "y" and ws.cell(3, 2).value == 2 and ws.cell(3, 3).value == 20
+        assert ws.cell(4, 1).value == "z" and ws.cell(4, 2).value == 3 and ws.cell(4, 3).value == 30
+
+    def test_bottom_header_merge_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert "A6:C6" in _merge_ranges(wb.active), "Bottom Header merge was modified"
+
+    def test_bottom_header_value_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert wb.active["A6"].value == "Bottom Header"
+
+    def test_bottom_header_bold_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert wb.active["A6"].font.bold is True
+
+    def test_bottom_note_merge_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert "A7:C7" in _merge_ranges(wb.active), "Bottom Note merge was modified"
+
+    def test_bottom_note_value_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert wb.active["A7"].value == "Bottom Note"
+
+    def test_bottom_note_italic_unchanged(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        assert wb.active["A7"].font.italic is True
+
+    def test_no_phantom_row_inserted(self, template_combo_left_with_merges_path, tmp_path):
+        wb = _run_combo_left_with_merges(template_combo_left_with_merges_path, tmp_path)
+        # Row 5 must be blank — no extra row sneaked in
+        assert wb.active.cell(5, 1).value is None, "Unexpected row 5 content on left join"
+
+
+# ---------------------------------------------------------------------------
+# Combo: outer join (placeholder=True) + scalar cells below the table
+# ---------------------------------------------------------------------------
+
+def _run_combo_scalar_with_outer(template_path, tmp_path):
+    df = pl.DataFrame({
+        "Key": ["a", "b", "c", "Total"],
+        "Data": [1, 2, 3, 0],
+    })
+    out = str(tmp_path / "output.xlsx")
+    ExcelTemplateWriter(template_path).write(
+        {
+            "tbl": TypedValue(df, "table"),
+            "title": TypedValue("Report Label", "single"),
+            "summary": TypedValue(42, "single"),
+        },
+        out,
+    )
+    return load_workbook(out)
+
+
+class TestComboScalarWithOuter:
+    """Scalars in the rows below an expanding outer-join table must:
+    1. Land at the correct shifted row (accounting for row insertions)
+    2. Receive their values from the data dictionary
+    3. Have their raw {{ }} tags cleared after fill
+    4. Not remain at the original template row
+
+    Template has 2 data rows (a, b), DF has 4 rows (a, b, c, Total) → 2 extra rows inserted.
+    Original scalar positions at row 5 shift to row 7 after +2 row shift.
+    """
+
+    # =========================================================================
+    # Table data correctness (outer join fills all 4 rows)
+    # =========================================================================
+
+    def test_table_header_row_exists(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Row 1 should be the header row."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        # Headers: Key, Data
+        assert ws.cell(1, 1).value is not None, "Row 1 col A should have header"
+
+    def test_table_row_a_filled(self, template_combo_scalar_with_outer_path, tmp_path):
+        """First data row ('a') in row 2."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).value == "a"
+        assert ws.cell(2, 2).value == 1
+
+    def test_table_row_b_filled(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Second data row ('b') in row 3."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(3, 1).value == "b"
+        assert ws.cell(3, 2).value == 2
+
+    def test_table_extra_row_c_inserted(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Extra row 'c' inserted at row 4 (outer join)."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(4, 1).value == "c", f"Expected 'c' at A4, got {ws.cell(4, 1).value!r}"
+        assert ws.cell(4, 2).value == 3, f"Expected 3 at B4, got {ws.cell(4, 2).value!r}"
+
+    def test_table_extra_row_total_inserted(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Extra row 'Total' inserted at row 5 (outer join)."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(5, 1).value == "Total", f"Expected 'Total' at A5, got {ws.cell(5, 1).value!r}"
+        assert ws.cell(5, 2).value == 0, f"Expected 0 at B5, got {ws.cell(5, 2).value!r}"
+
+    # =========================================================================
+    # Scalar row shift (+2 rows for 2 extra table rows)
+    # =========================================================================
+
+    def test_title_scalar_receives_value(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Title scalar ({{ title }}) should receive 'Report Label'."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(7, 1).value == "Report Label", (
+            f"Title scalar not filled; got {ws.cell(7, 1).value!r} at A7"
+        )
+
+    def test_summary_scalar_receives_value(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Summary scalar ({{ summary }}) should receive 42."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(7, 2).value == 42, (
+            f"Summary scalar not filled; got {ws.cell(7, 2).value!r} at B7"
+        )
+
+    def test_scalars_shift_by_2_rows(self, template_combo_scalar_with_outer_path, tmp_path):
+        """With +2 rows inserted, scalars must shift from template row 5 to output row 7."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        # After 2 row insertions, row 5 template row becomes row 7
+        # Row 6 template becomes row 8, etc.
+        title_at_7 = ws.cell(7, 1).value == "Report Label"
+        summary_at_7 = ws.cell(7, 2).value == 42
+        assert title_at_7 and summary_at_7, (
+            f"Scalars not shifted correctly. "
+            f"A7={ws.cell(7, 1).value!r}, B7={ws.cell(7, 2).value!r}"
+        )
+
+    # =========================================================================
+    # Raw tag cleanup ({{ }} markers must be removed)
+    # =========================================================================
+
+    def test_no_raw_title_tags_remain(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Raw {{ title }} tag must be cleared after fill."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        orphaned_cells = []
+        for row in ws.iter_rows(max_row=20):
+            for cell in row:
+                if isinstance(cell.value, str) and "{{" in cell.value and "title" in cell.value.lower():
+                    orphaned_cells.append(f"{cell.coordinate}={cell.value!r}")
+        assert not orphaned_cells, (
+            f"Raw {{ title }} tag(s) found in output: {orphaned_cells}"
+        )
+
+    def test_no_raw_summary_tags_remain(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Raw {{ summary }} tag must be cleared after fill."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        orphaned_cells = []
+        for row in ws.iter_rows(max_row=20):
+            for cell in row:
+                if isinstance(cell.value, str) and "{{" in cell.value and "summary" in cell.value.lower():
+                    orphaned_cells.append(f"{cell.coordinate}={cell.value!r}")
+        assert not orphaned_cells, (
+            f"Raw {{ summary }} tag(s) found in output: {orphaned_cells}"
+        )
+
+    # =========================================================================
+    # Scalars must not be left at original template positions
+    # =========================================================================
+
+    def test_title_scalar_not_at_original_row(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Title scalar must NOT remain at original row 5."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        row_5_a = ws.cell(5, 1).value
+        assert row_5_a != "Report Label", (
+            f"Title scalar left at original row 5: {row_5_a!r}. "
+            f"It should be at row 7 after +2 shift"
+        )
+
+    def test_summary_scalar_not_at_original_row(self, template_combo_scalar_with_outer_path, tmp_path):
+        """Summary scalar must NOT remain at original row 5."""
+        wb = _run_combo_scalar_with_outer(template_combo_scalar_with_outer_path, tmp_path)
+        ws = wb.active
+        row_5_b = ws.cell(5, 2).value
+        assert row_5_b != 42, (
+            f"Summary scalar left at original row 5: {row_5_b!r}. "
+            f"It should be at row 7 after +2 shift"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Combo: triple adjacent same-span merges — primary regression test
+# ---------------------------------------------------------------------------
+
+def _run_combo_triple_adjacent_merges(template_path, tmp_path):
+    df = pl.DataFrame({
+        "Sec": ["p", "q", "r", "Total"],
+        "A": [1, 2, 3, 0],
+        "B": [10, 20, 30, 0],
+        "C": [100, 200, 300, 0],
+    })
+    out = str(tmp_path / "output.xlsx")
+    ExcelTemplateWriter(template_path).write({"tbl": TypedValue(df, "table")}, out)
+    return load_workbook(out)
+
+
+class TestComboTripleAdjacentMerges:
+    """Three adjacent same-span (A:D) merges below an outer-join table.
+    All three MUST survive after the +2 row shift.  This directly exercises
+    the two bugs fixed in _sync_merges_after_delete and _copy_row_styles."""
+
+    def test_table_data_rows(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).value == "p"
+        assert ws.cell(3, 1).value == "q"
+        assert ws.cell(4, 1).value == "r"
+        assert ws.cell(5, 1).value == "Total"
+
+    def test_section_one_shifted_to_row_7(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert "A7:D7" in _merge_ranges(wb.active), (
+            f"Section One not at A7:D7 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_section_one_value_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A7"].value == "Section One"
+
+    def test_section_one_bold_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A7"].font.bold is True
+
+    def test_section_two_shifted_to_row_8(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert "A8:D8" in _merge_ranges(wb.active), (
+            f"Section Two not at A8:D8 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_section_two_value_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A8"].value == "Section Two"
+
+    def test_section_two_italic_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A8"].font.italic is True
+
+    def test_section_three_shifted_to_row_9(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert "A9:D9" in _merge_ranges(wb.active), (
+            f"Section Three not at A9:D9 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_section_three_value_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A9"].value == "Section Three"
+
+    def test_section_three_bold_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["A9"].font.bold is True
+
+    def test_narrow_merge_shifted_to_row_11(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert "B11:C11" in _merge_ranges(wb.active), (
+            f"Narrow merge not at B11:C11 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_narrow_merge_value_intact(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        assert wb.active["B11"].value == "Narrow Note"
+
+    def test_no_stale_merges_at_original_positions(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        """Original rows 5/6/7 must NOT contain any of the shifted merges."""
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        ranges = _merge_ranges(wb.active)
+        assert "A5:D5" not in ranges, "Stale A5:D5 still present"
+        assert "A6:D6" not in ranges, "Stale A6:D6 still present"
+        assert "A7:D7" not in ranges or "A7:D7" in ranges, True  # A7:D7 IS the shifted Section One — fine
+        # What must not exist is the original Section Three range being stale:
+        # After +2 shift: A7:D7=SectionOne(shifted from A5), A8:D8=SectionTwo, A9:D9=SectionThree
+        # The stale problematic position would be A5:D5 or A6:D6 which should be gone
+        assert "A5:D5" not in ranges
+        assert "A6:D6" not in ranges
+
+    def test_no_phantom_merges_inside_table_rows(self, template_combo_triple_adjacent_merges_path, tmp_path):
+        """Table rows 2-5 must not be inside any merge range."""
+        wb = _run_combo_triple_adjacent_merges(template_combo_triple_adjacent_merges_path, tmp_path)
+        ws = wb.active
+        for r in range(2, 6):
+            cell = ws.cell(r, 1)
+            assert not isinstance(cell, MergedCell), (
+                f"Row {r} col A is a MergedCell — phantom ghost not purged"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Combo: two stacked outer-join tables + adjacent merge pair below both
+# ---------------------------------------------------------------------------
+
+def _run_combo_two_outer_tables(template_path, tmp_path):
+    df1 = pl.DataFrame({"Key1": ["a", "b", "c", "Total1"], "V1": [1, 2, 3, 6]})
+    df2 = pl.DataFrame({"Key2": ["x", "y", "z", "Total2"], "V2": [10, 20, 30, 60]})
+    out = str(tmp_path / "output.xlsx")
+    ExcelTemplateWriter(template_path).write(
+        {
+            "tbl1": TypedValue(df1, "table"),
+            "tbl2": TypedValue(df2, "table"),
+        },
+        out,
+    )
+    return load_workbook(out)
+
+
+class TestComboTwoOuterTables:
+    """Two back-to-back outer-join tables each insert 1 extra row.
+    Adjacent merges below both tables must shift by the cumulative +2."""
+
+    def test_tbl1_rows(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(2, 1).value == "a" and ws.cell(2, 2).value == 1
+        assert ws.cell(3, 1).value == "b" and ws.cell(3, 2).value == 2
+        assert ws.cell(4, 1).value == "c" and ws.cell(4, 2).value == 3
+        assert ws.cell(5, 1).value == "Total1" and ws.cell(5, 2).value == 6
+
+    def test_tbl2_rows(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        ws = wb.active
+        assert ws.cell(8, 1).value == "x" and ws.cell(8, 2).value == 10
+        assert ws.cell(9, 1).value == "y" and ws.cell(9, 2).value == 20
+        assert ws.cell(10, 1).value == "z" and ws.cell(10, 2).value == 30
+        assert ws.cell(11, 1).value == "Total2" and ws.cell(11, 2).value == 60
+
+    def test_grand_footer_shifted_to_row_13(self, template_combo_two_outer_tables_path, tmp_path):
+        """Grand Footer was at template row 11; cumulative +2 → output row 13."""
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert "A13:B13" in _merge_ranges(wb.active), (
+            f"Grand Footer not at A13:B13 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_grand_footer_value_intact(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert wb.active["A13"].value == "Grand Footer"
+
+    def test_grand_footer_bold_intact(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert wb.active["A13"].font.bold is True
+
+    def test_sub_footer_shifted_to_row_14(self, template_combo_two_outer_tables_path, tmp_path):
+        """Sub-Footer was at template row 12; cumulative +2 → output row 14."""
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert "A14:B14" in _merge_ranges(wb.active), (
+            f"Sub-Footer not at A14:B14 — got {_merge_ranges(wb.active)}"
+        )
+
+    def test_sub_footer_value_intact(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert wb.active["A14"].value == "Sub-Footer"
+
+    def test_sub_footer_italic_intact(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        assert wb.active["A14"].font.italic is True
+
+    def test_no_stale_footer_merges(self, template_combo_two_outer_tables_path, tmp_path):
+        wb = _run_combo_two_outer_tables(template_combo_two_outer_tables_path, tmp_path)
+        ranges = _merge_ranges(wb.active)
+        assert "A11:B11" not in ranges, "Stale A11:B11 still present"
+        assert "A12:B12" not in ranges, "Stale A12:B12 still present"

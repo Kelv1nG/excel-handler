@@ -2,6 +2,14 @@ import pytest
 from pathlib import Path
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+OUTPUT_DIR = Path(__file__).parent / "output"
+
+
+def pytest_configure(config):
+    """Ensure output directory exists for test results and artifacts."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    # Configure pytest to use output directory for temporary files during test runs
+    config.option.basetemp = OUTPUT_DIR / ".pytest_tmp"
 
 
 @pytest.fixture(scope="session")
@@ -206,7 +214,7 @@ def bug_on_insert_path():
     Used to reproduce the stale-address bug where scalars below an expanding
     outer join table landed on the wrong row.
     """
-    return str(Path(__file__).parent.parent / "bug-on-insert.xlsx")
+    return str(FIXTURES_DIR / "bug-on-insert.xlsx")
 
 
 @pytest.fixture(scope="session")
@@ -231,3 +239,45 @@ def template_style_src_first_path():
     Used to verify inserted rows inherit the tag row's plain style, NOT the Total row style.
     """
     return str(FIXTURES_DIR / "template_style_src_first.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_combo_outer_merges_below_path():
+    """Outer join (placeholder=True) + 2 adjacent same-span merges below the table.
+    DF a/b/c+Total → net +2 shift → merges land at A7:B7 and A8:B8.
+    Primary regression test for the stale-merge-registry shift bug.
+    """
+    return str(FIXTURES_DIR / "template_combo_outer_merges_below.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_combo_left_with_merges_path():
+    """Left join (no row insertion) + 2 adjacent merges below.
+    Merges must be completely untouched since no rows are inserted.
+    """
+    return str(FIXTURES_DIR / "template_combo_left_with_merges.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_combo_scalar_with_outer_path():
+    """Outer join (placeholder=True) + scalar cells below the table.
+    Scalars must shift to their correct row after table expansion.
+    """
+    return str(FIXTURES_DIR / "template_combo_scalar_with_outer.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_combo_triple_adjacent_merges_path():
+    """Three adjacent same-span (A:D) merges below an outer-join table.
+    All three must survive after the +2 row-shift — direct replication of the
+    stale-registry bug that silently dropped merges during _copy_row_styles.
+    """
+    return str(FIXTURES_DIR / "template_combo_triple_adjacent_merges.xlsx")
+
+
+@pytest.fixture(scope="session")
+def template_combo_two_outer_tables_path():
+    """Two stacked outer-join tables (each inserting 1 row) + adjacent merge pair below.
+    Merges must shift by the cumulative +2 (one from each table expansion).
+    """
+    return str(FIXTURES_DIR / "template_combo_two_outer_tables.xlsx")
