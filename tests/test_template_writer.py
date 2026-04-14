@@ -2891,3 +2891,156 @@ class TestMasterNoSpuriousBorders(_MasterBase):
         assert sides == {"top": "thin", "bottom": "thin", "left": "thin", "right": "thin"}, (
             f"B28 unexpected border set: {sides}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Image tag: {{ variable | image() }} / {{ variable | image(width=N, height=M) }}
+# ---------------------------------------------------------------------------
+
+import io
+import pytest
+from PIL import Image as PILImage
+from openpyxl.utils.units import pixels_to_EMU
+
+from excel._types import ImageMeta
+from excel.template_reader import MarkedCell
+
+
+def _make_png(width: int = 80, height: int = 60) -> bytes:
+    """Return raw PNG bytes for a solid-colour image of the given size."""
+    buf = io.BytesIO()
+    PILImage.new("RGB", (width, height), color=(0, 128, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _image_at(ws, col: int, row: int):
+    """Return the Image whose OneCellAnchor starts at (col, row) (0-based openpyxl coords)."""
+    for img in ws._images:
+        fm = img.anchor._from
+        if fm.col == col and fm.row == row:
+            return img
+    return None
+
+
+class TestImageMetaParsing:
+    """Unit tests for ImageMeta.from_cell() — no file I/O."""
+
+    def _cell(self, metadata: str) -> MarkedCell:
+        raw = f"{{{{ var | {metadata} }}}}" if metadata else "{{ var }}"
+        return MarkedCell(name="var", sheet="Sheet1", cell_addr="B2", raw=raw, metadata=metadata)
+
+    def test_no_size_gives_none_none(self):
+        meta = ImageMeta.from_cell(self._cell("image()"))
+        assert meta.width is None
+        assert meta.height is None
+
+    def test_both_dimensions_parsed(self):
+        meta = ImageMeta.from_cell(self._cell("image(width=100, height=50)"))
+        assert meta.width == 100
+        assert meta.height == 50
+
+    def test_width_only(self):
+        meta = ImageMeta.from_cell(self._cell("image(width=200)"))
+        assert meta.width == 200
+        assert meta.height is None
+
+    def test_height_only(self):
+        meta = ImageMeta.from_cell(self._cell("image(height=30)"))
+        assert meta.width is None
+        assert meta.height == 30
+
+    def test_values_are_ints(self):
+        meta = ImageMeta.from_cell(self._cell("image(width=150, height=75)"))
+        assert isinstance(meta.width, int)
+        assert isinstance(meta.height, int)
+
+
+class TestImageWriter:
+    """Integration tests: write image() tags via ExcelTemplateWriter."""
+
+    def _write(self, template_image_path, tmp_path, png_bytes: bytes):
+        """Fill template_image.xlsx with three images and return the output workbook."""
+        output = str(tmp_path / "image_output.xlsx")
+        writer = ExcelTemplateWriter(template_image_path)
+        writer.write(
+            {
+                "logo":   TypedValue(io.BytesIO(png_bytes), "image"),
+                "banner": TypedValue(io.BytesIO(png_bytes), "image"),
+                "icon":   TypedValue(io.BytesIO(png_bytes), "image"),
+            },
+            output,
+        )
+        return load_workbook(output)
+
+    # --- cell placeholder cleared ---
+
+    def test_logo_cell_cleared(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        assert wb.active["B2"].value is None
+
+    def test_banner_cell_cleared(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        assert wb.active["B4"].value is None
+
+    def test_icon_cell_cleared(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        assert wb.active["B6"].value is None
+
+    # --- images are embedded ---
+
+    def test_three_images_embedded(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        assert len(wb.active._images) == 3
+
+    # --- anchor positions (0-based: B=col 1, rows 1/3/5) ---
+
+    def test_logo_anchored_at_B2(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        img = _image_at(wb.active, col=1, row=1)
+        assert img is not None, "No image found at B2"
+
+    def test_banner_anchored_at_B4(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        img = _image_at(wb.active, col=1, row=3)
+        assert img is not None, "No image found at B4"
+
+    def test_icon_anchored_at_B6(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png())
+        img = _image_at(wb.active, col=1, row=5)
+        assert img is not None, "No image found at B6"
+
+    # --- natural size (logo: no override) ---
+
+    def test_logo_natural_width(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=1)
+        assert img.anchor.ext.cx == pixels_to_EMU(80)
+
+    def test_logo_natural_height(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=1)
+        assert img.anchor.ext.cy == pixels_to_EMU(60)
+
+    # --- both dimensions overridden (banner: width=100, height=50) ---
+
+    def test_banner_width_overridden(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=3)
+        assert img.anchor.ext.cx == pixels_to_EMU(100)
+
+    def test_banner_height_overridden(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=3)
+        assert img.anchor.ext.cy == pixels_to_EMU(50)
+
+    # --- width-only override (icon: width=200, height keeps natural 60) ---
+
+    def test_icon_width_overridden(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=5)
+        assert img.anchor.ext.cx == pixels_to_EMU(200)
+
+    def test_icon_height_natural(self, template_image_path, tmp_path):
+        wb = self._write(template_image_path, tmp_path, _make_png(80, 60))
+        img = _image_at(wb.active, col=1, row=5)
+        assert img.anchor.ext.cy == pixels_to_EMU(60)

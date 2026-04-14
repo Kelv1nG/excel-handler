@@ -81,6 +81,15 @@ def template_tight_footer_path():
 
 
 @pytest.fixture(scope="session")
+def template_image_path():
+    """Template with image() tags:
+    B2 = {{ logo | image() }}, B4 = {{ banner | image(width=100, height=50) }},
+    B6 = {{ icon | image(width=200) }}.
+    """
+    return str(FIXTURES_DIR / "template_image.xlsx")
+
+
+@pytest.fixture(scope="session")
 def template_left_join_path():
     """Template with left join tag — no extra rows inserted, merges must be untouched."""
     return str(FIXTURES_DIR / "template_left_join.xlsx")

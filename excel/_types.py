@@ -2,9 +2,9 @@
 
 Exports:
     JoinMode, InsertMode, StyleSource — Literal type aliases
-    OrderBy, FillSpec, TableMeta — dataclasses for parsing template tag metadata
+    OrderBy, FillSpec, TableMeta, ImageMeta — dataclasses for parsing template tag metadata
     _EndTableMarker — structural marker for {{ end_table }} cells
-    _apply_fill, _is_loop, _is_table — helper functions
+    _apply_fill, _is_loop, _is_table, _is_image — helper functions
     _FILL_MISSING — sentinel for missing fill spec keys
     _TemplateRegex — regex patterns for metadata extraction
 """
@@ -218,6 +218,35 @@ def _is_loop(cell: MarkedCell) -> bool:
 def _is_table(cell: MarkedCell) -> bool:
     """Return ``True`` if *cell* carries a ``table()`` metadata tag."""
     return cell.parse_metadata().get("type") == "table"
+
+
+def _is_image(cell: MarkedCell) -> bool:
+    """Return ``True`` if *cell* carries an ``image()`` metadata tag."""
+    return cell.parse_metadata().get("type") == "image"
+
+
+@dataclass(frozen=True)
+class ImageMeta:
+    """Parsed metadata for a ``{{ variable | image(...) }}`` tag.
+
+    Attributes:
+        width:  Override width in pixels.  ``None`` keeps the image's natural width.
+        height: Override height in pixels.  ``None`` keeps the image's natural height.
+    """
+
+    width: int | None
+    height: int | None
+
+    @classmethod
+    def from_cell(cls, mc: MarkedCell) -> ImageMeta:
+        """Build an ``ImageMeta`` from a tagged ``MarkedCell``."""
+        meta = mc.parse_metadata()
+        raw_w = meta.get("width")
+        raw_h = meta.get("height")
+        return cls(
+            width=int(raw_w) if raw_w is not None else None,
+            height=int(raw_h) if raw_h is not None else None,
+        )
 
 
 @dataclass(frozen=True)

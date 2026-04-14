@@ -1594,6 +1594,27 @@ def create_template_master():
     print("  template_master.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# template_image.xlsx
+# Template with image() tags for testing ExcelTemplateWriter image support.
+#
+# Sheet1 layout:
+#   B2  → {{ logo | image() }}           — natural size (no override)
+#   B4  → {{ banner | image(width=100, height=50) }}  — both dims overridden
+#   B6  → {{ icon | image(width=200) }}  — width-only override
+# ---------------------------------------------------------------------------
+def create_template_image():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["B2"] = "{{ logo | image() }}"
+    ws["B4"] = "{{ banner | image(width=100, height=50) }}"
+    ws["B6"] = "{{ icon | image(width=200) }}"
+    wb.save(FIXTURES_DIR / "template_image.xlsx")
+    wb.close()
+    print("  template_image.xlsx")
+
+
 if __name__ == "__main__":
     print("Creating fixtures in", FIXTURES_DIR)
     create_simple_table()
@@ -1634,4 +1655,5 @@ if __name__ == "__main__":
     create_template_combo_two_outer_tables()
     create_bug_on_insert()
     create_template_master()
+    create_template_image()
     print("Done.")

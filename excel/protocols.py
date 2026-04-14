@@ -5,7 +5,7 @@ from typing import Any, Protocol, Literal, Self
 
 import polars as pl
 
-kind = Literal["single", "list", "table", "record"]
+kind = Literal["single", "list", "table", "record", "image"]
 
 
 @dataclass

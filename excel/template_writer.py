@@ -22,10 +22,12 @@ from excel._types import (
     OrderBy,
     FillSpec,
     TableMeta,
+    ImageMeta,
     _EndTableMarker,
     _apply_fill,
     _is_loop,
     _is_table,
+    _is_image,
     _FILL_MISSING,
     _VALID_JOIN_MODES,
     _VALID_STYLE_SOURCES,
@@ -100,8 +102,9 @@ class ExcelTemplateWriter:
         wb = load_excel_workbook(self._template)
         structure = ExcelTemplateReader().read(self._template)
 
-        loop_rows, tables, scalars = self._categorize_template_cells(structure)
+        loop_rows, tables, scalars, images = self._categorize_template_cells(structure)
         self._fill_scalar_cells(wb, scalars, vars)
+        self._fill_image_cells(wb, images, vars)
         self._fill_loop_rows(wb, loop_rows, vars)
         self._check_table_collisions(wb, tables, vars)
         self._fill_table_cells(wb, tables, vars)
@@ -114,15 +117,17 @@ class ExcelTemplateWriter:
         dict[tuple[str, int], list[MarkedCell]],
         list[MarkedCell],
         list[MarkedCell],
+        list[MarkedCell],
     ]:
-        """Split tagged cells into loop participants, tables, and scalars.
+        """Split tagged cells into loop participants, tables, scalars, and images.
         
         Returns:
-            (loop_rows, tables, scalars) where loop_rows is keyed by (sheet_name, row_number).
+            (loop_rows, tables, scalars, images) where loop_rows is keyed by (sheet_name, row_number).
         """
         loop_rows: dict[tuple[str, int], list[MarkedCell]] = {}
         tables: list[MarkedCell] = []
         scalars: list[MarkedCell] = []
+        images: list[MarkedCell] = []
 
         for sheet_name, cells in structure.items():
             for cell in cells:
@@ -133,10 +138,12 @@ class ExcelTemplateWriter:
                 elif _is_loop(cell):
                     row_n = coordinate_to_tuple(cell.cell_addr)[0]
                     loop_rows.setdefault((sheet_name, row_n), []).append(cell)
+                elif _is_image(cell):
+                    images.append(cell)
                 else:
                     scalars.append(cell)
 
-        return loop_rows, tables, scalars
+        return loop_rows, tables, scalars, images
 
     def _fill_scalar_cells(
         self, wb: Workbook, scalars: list[MarkedCell], vars: dict[str, TypedValue]
@@ -161,6 +168,32 @@ class ExcelTemplateWriter:
                 ws.cell(row_n, col_n).value = tv.value[col_name][0]
             else:
                 ws.cell(row_n, col_n).value = vars[mc.name].value
+
+    def _fill_image_cells(
+        self, wb: Workbook, images: list[MarkedCell], vars: dict[str, TypedValue]
+    ) -> None:
+        """Anchor images at their tagged cells, clearing the placeholder text.
+
+        The variable value must be a file path (``str`` or ``PathLike``) or a
+        ``PIL.Image.Image`` instance accepted by openpyxl.
+
+        Dimensions from the tag (``width=`` / ``height=`` in pixels) override the
+        image's natural size.  Omitting a dimension keeps the natural value.
+        """
+        from openpyxl.drawing.image import Image as _OxlImage
+
+        for mc in images:
+            ws = wb[mc.sheet]
+            row_n, col_n = coordinate_to_tuple(mc.cell_addr)
+            ws.cell(row_n, col_n).value = None
+
+            img_meta = ImageMeta.from_cell(mc)
+            img = _OxlImage(vars[mc.name].value)
+            if img_meta.width is not None:
+                img.width = img_meta.width
+            if img_meta.height is not None:
+                img.height = img_meta.height
+            ws.add_image(img, mc.cell_addr)
 
     def _fill_loop_rows(
         self,
